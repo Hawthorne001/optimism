@@ -9,19 +9,17 @@ import (
 	"github.com/ethereum-optimism/optimism/op-node/rollup"
 )
 
-var Mainnet, Goerli, Sepolia *rollup.Config
+// OPSepolia loads the op-sepolia rollup config. This is intended for tests that need an arbitrary, valid rollup config.
+func OPSepolia() *rollup.Config {
+	return mustLoadRollupConfig("op-sepolia")
+}
 
-func init() {
-	mustCfg := func(name string) *rollup.Config {
-		cfg, err := GetRollupConfig(name)
-		if err != nil {
-			panic(fmt.Errorf("failed to load rollup config %q: %w", name, err))
-		}
-		return cfg
+func mustLoadRollupConfig(name string) *rollup.Config {
+	cfg, err := GetRollupConfig(name)
+	if err != nil {
+		panic(fmt.Errorf("failed to load rollup config %q: %w", name, err))
 	}
-	Mainnet = mustCfg("op-mainnet")
-	Goerli = mustCfg("op-goerli")
-	Sepolia = mustCfg("op-sepolia")
+	return cfg
 }
 
 var L2ChainIDToNetworkDisplayName = func() map[string]string {
@@ -43,8 +41,6 @@ func AvailableNetworks() []string {
 
 func handleLegacyName(name string) string {
 	switch name {
-	case "goerli":
-		return "op-goerli"
 	case "mainnet":
 		return "op-mainnet"
 	case "sepolia":

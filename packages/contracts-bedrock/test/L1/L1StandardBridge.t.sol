@@ -1,32 +1,33 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
-// Testing utilities
+// Testing
 import { stdStorage, StdStorage } from "forge-std/Test.sol";
-import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import { Bridge_Initializer } from "test/setup/Bridge_Initializer.sol";
+
+// Contracts
+import { ERC20 } from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import { StandardBridge } from "src/universal/StandardBridge.sol";
 
 // Libraries
 import { Predeploys } from "src/libraries/Predeploys.sol";
-
-// Target contract dependencies
-import { StandardBridge } from "src/universal/StandardBridge.sol";
-import { L1StandardBridge } from "src/L1/L1StandardBridge.sol";
-import { L2StandardBridge } from "src/L2/L2StandardBridge.sol";
-import { CrossDomainMessenger } from "src/universal/CrossDomainMessenger.sol";
-import { SuperchainConfig } from "src/L1/SuperchainConfig.sol";
 import { AddressAliasHelper } from "src/vendor/AddressAliasHelper.sol";
 
-// Target contract
-import { OptimismPortal } from "src/L1/OptimismPortal.sol";
+// Interfaces
+import { ICrossDomainMessenger } from "src/universal/interfaces/ICrossDomainMessenger.sol";
+import { ISuperchainConfig } from "src/L1/interfaces/ISuperchainConfig.sol";
+import { IOptimismPortal } from "src/L1/interfaces/IOptimismPortal.sol";
+import { IL1StandardBridge } from "src/L1/interfaces/IL1StandardBridge.sol";
 
 contract L1StandardBridge_Getter_Test is Bridge_Initializer {
     /// @dev Test that the accessors return the correct initialized values.
     function test_getters_succeeds() external view {
         assert(l1StandardBridge.l2TokenBridge() == address(l2StandardBridge));
-        assert(l1StandardBridge.OTHER_BRIDGE() == l2StandardBridge);
-        assert(l1StandardBridge.messenger() == l1CrossDomainMessenger);
-        assert(l1StandardBridge.MESSENGER() == l1CrossDomainMessenger);
+        assert(address(l1StandardBridge.OTHER_BRIDGE()) == address(l2StandardBridge));
+        assert(address(l1StandardBridge.messenger()) == address(l1CrossDomainMessenger));
+        assert(address(l1StandardBridge.MESSENGER()) == address(l1CrossDomainMessenger));
+        assert(l1StandardBridge.superchainConfig() == superchainConfig);
+        assert(l1StandardBridge.systemConfig() == systemConfig);
     }
 }
 
@@ -35,37 +36,39 @@ contract L1StandardBridge_Initialize_Test is Bridge_Initializer {
     /// @notice Marked virtual to be overridden in
     ///         test/kontrol/deployment/DeploymentSummary.t.sol
     function test_constructor_succeeds() external virtual {
-        L1StandardBridge impl = L1StandardBridge(deploy.mustGetAddress("L1StandardBridge"));
+        IL1StandardBridge impl = IL1StandardBridge(deploy.mustGetAddress("L1StandardBridge"));
         assertEq(address(impl.superchainConfig()), address(0));
         assertEq(address(impl.MESSENGER()), address(0));
         assertEq(address(impl.messenger()), address(0));
         assertEq(address(impl.OTHER_BRIDGE()), Predeploys.L2_STANDARD_BRIDGE);
         assertEq(address(impl.otherBridge()), Predeploys.L2_STANDARD_BRIDGE);
         assertEq(address(l2StandardBridge), Predeploys.L2_STANDARD_BRIDGE);
+        assertEq(address(impl.systemConfig()), address(0));
     }
 
     /// @dev Test that the initialize function sets the correct values.
-    function test_initialize_succeeds() external {
+    function test_initialize_succeeds() external view {
         assertEq(address(l1StandardBridge.superchainConfig()), address(superchainConfig));
         assertEq(address(l1StandardBridge.MESSENGER()), address(l1CrossDomainMessenger));
         assertEq(address(l1StandardBridge.messenger()), address(l1CrossDomainMessenger));
         assertEq(address(l1StandardBridge.OTHER_BRIDGE()), Predeploys.L2_STANDARD_BRIDGE);
         assertEq(address(l1StandardBridge.otherBridge()), Predeploys.L2_STANDARD_BRIDGE);
         assertEq(address(l2StandardBridge), Predeploys.L2_STANDARD_BRIDGE);
+        assertEq(address(l1StandardBridge.systemConfig()), address(systemConfig));
     }
 }
 
 contract L1StandardBridge_Pause_Test is Bridge_Initializer {
     /// @dev Verifies that the `paused` accessor returns the same value as the `paused` function of the
     ///      `superchainConfig`.
-    function test_paused_succeeds() external {
+    function test_paused_succeeds() external view {
         assertEq(l1StandardBridge.paused(), superchainConfig.paused());
     }
 
     /// @dev Ensures that the `paused` function of the bridge contract actually calls the `paused` function of the
     ///      `superchainConfig`.
     function test_pause_callsSuperchainConfig_succeeds() external {
-        vm.expectCall(address(superchainConfig), abi.encodeWithSelector(SuperchainConfig.paused.selector));
+        vm.expectCall(address(superchainConfig), abi.encodeWithSelector(ISuperchainConfig.paused.selector));
         l1StandardBridge.paused();
     }
 
@@ -96,7 +99,7 @@ contract L1StandardBridge_Pause_TestFail is Bridge_Initializer {
 
         vm.mockCall(
             address(l1StandardBridge.messenger()),
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.otherBridge()))
         );
     }
@@ -171,7 +174,7 @@ contract L1StandardBridge_Receive_Test is Bridge_Initializer {
         vm.expectCall(
             address(l1CrossDomainMessenger),
             abi.encodeWithSelector(
-                CrossDomainMessenger.sendMessage.selector,
+                ICrossDomainMessenger.sendMessage.selector,
                 address(l2StandardBridge),
                 abi.encodeWithSelector(StandardBridge.finalizeBridgeETH.selector, alice, alice, 100, hex""),
                 200_000
@@ -185,45 +188,62 @@ contract L1StandardBridge_Receive_Test is Bridge_Initializer {
     }
 }
 
-contract L1StandardBridge_Receive_TestFail { }
+contract L1StandardBridge_Receive_TestFail is Bridge_Initializer {
+    /// @dev Tests receive function reverts with custom gas token.
+    function testFuzz_receive_customGasToken_reverts(uint256 _value) external {
+        vm.prank(alice, alice);
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(18))
+        );
+        vm.deal(alice, _value);
+        (bool success, bytes memory data) = address(l1StandardBridge).call{ value: _value }(hex"");
+        assertFalse(success);
+        assembly {
+            data := add(data, 0x04)
+        }
+        assertEq(abi.decode(data, (string)), "StandardBridge: cannot bridge ETH with custom gas token");
+    }
+}
 
 contract PreBridgeETH is Bridge_Initializer {
     /// @dev Asserts the expected calls and events for bridging ETH depending
     ///      on whether the bridge call is legacy or not.
-    function _preBridgeETH(bool isLegacy) internal {
+    function _preBridgeETH(bool isLegacy, uint256 value) internal {
         assertEq(address(optimismPortal).balance, 0);
         uint256 nonce = l1CrossDomainMessenger.messageNonce();
         uint256 version = 0; // Internal constant in the OptimismPortal: DEPOSIT_VERSION
         address l1MessengerAliased = AddressAliasHelper.applyL1ToL2Alias(address(l1CrossDomainMessenger));
 
         bytes memory message =
-            abi.encodeWithSelector(StandardBridge.finalizeBridgeETH.selector, alice, alice, 500, hex"dead");
+            abi.encodeWithSelector(StandardBridge.finalizeBridgeETH.selector, alice, alice, value, hex"dead");
 
         if (isLegacy) {
             vm.expectCall(
                 address(l1StandardBridge),
-                500,
+                value,
                 abi.encodeWithSelector(l1StandardBridge.depositETH.selector, 50000, hex"dead")
             );
         } else {
             vm.expectCall(
                 address(l1StandardBridge),
-                500,
+                value,
                 abi.encodeWithSelector(l1StandardBridge.bridgeETH.selector, 50000, hex"dead")
             );
         }
         vm.expectCall(
             address(l1CrossDomainMessenger),
-            500,
-            abi.encodeWithSelector(CrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 50000)
+            value,
+            abi.encodeWithSelector(
+                ICrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 50000
+            )
         );
 
         bytes memory innerMessage = abi.encodeWithSelector(
-            CrossDomainMessenger.relayMessage.selector,
+            ICrossDomainMessenger.relayMessage.selector,
             nonce,
             address(l1StandardBridge),
             address(l2StandardBridge),
-            500,
+            value,
             50000,
             message
         );
@@ -231,24 +251,24 @@ contract PreBridgeETH is Bridge_Initializer {
         uint64 baseGas = l1CrossDomainMessenger.baseGas(message, 50000);
         vm.expectCall(
             address(optimismPortal),
-            500,
+            value,
             abi.encodeWithSelector(
-                OptimismPortal.depositTransaction.selector,
+                IOptimismPortal.depositTransaction.selector,
                 address(l2CrossDomainMessenger),
-                500,
+                value,
                 baseGas,
                 false,
                 innerMessage
             )
         );
 
-        bytes memory opaqueData = abi.encodePacked(uint256(500), uint256(500), baseGas, false, innerMessage);
+        bytes memory opaqueData = abi.encodePacked(uint256(value), uint256(value), baseGas, false, innerMessage);
 
         vm.expectEmit(address(l1StandardBridge));
-        emit ETHDepositInitiated(alice, alice, 500, hex"dead");
+        emit ETHDepositInitiated(alice, alice, value, hex"dead");
 
         vm.expectEmit(address(l1StandardBridge));
-        emit ETHBridgeInitiated(alice, alice, 500, hex"dead");
+        emit ETHBridgeInitiated(alice, alice, value, hex"dead");
 
         // OptimismPortal emits a TransactionDeposited event on `depositTransaction` call
         vm.expectEmit(address(optimismPortal));
@@ -260,7 +280,7 @@ contract PreBridgeETH is Bridge_Initializer {
 
         // SentMessageExtension1 event emitted by the CrossDomainMessenger
         vm.expectEmit(address(l1CrossDomainMessenger));
-        emit SentMessageExtension1(address(l1StandardBridge), 500);
+        emit SentMessageExtension1(address(l1StandardBridge), value);
 
         vm.prank(alice, alice);
     }
@@ -273,21 +293,8 @@ contract L1StandardBridge_DepositETH_Test is PreBridgeETH {
     ///      Only EOA can call depositETH.
     ///      ETH ends up in the optimismPortal.
     function test_depositETH_succeeds() external {
-        _preBridgeETH({ isLegacy: true });
+        _preBridgeETH({ isLegacy: true, value: 500 });
         l1StandardBridge.depositETH{ value: 500 }(50000, hex"dead");
-        assertEq(address(optimismPortal).balance, 500);
-    }
-}
-
-contract L1StandardBridge_BridgeETH_Test is PreBridgeETH {
-    /// @dev Tests that bridging ETH succeeds.
-    ///      Emits ETHDepositInitiated and ETHBridgeInitiated events.
-    ///      Calls depositTransaction on the OptimismPortal.
-    ///      Only EOA can call bridgeETH.
-    ///      ETH ends up in the optimismPortal.
-    function test_bridgeETH_succeeds() external {
-        _preBridgeETH({ isLegacy: false });
-        l1StandardBridge.bridgeETH{ value: 500 }(50000, hex"dead");
         assertEq(address(optimismPortal).balance, 500);
     }
 }
@@ -300,12 +307,48 @@ contract L1StandardBridge_DepositETH_TestFail is Bridge_Initializer {
         vm.prank(alice);
         l1StandardBridge.depositETH{ value: 1 }(300, hex"");
     }
+
+    /// @dev Tests that depositing reverts with custom gas token.
+    function test_depositETH_customGasToken_reverts() external {
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.prank(alice, alice);
+        vm.expectRevert("StandardBridge: cannot bridge ETH with custom gas token");
+        l1StandardBridge.depositETH(50000, hex"dead");
+    }
+}
+
+contract L1StandardBridge_BridgeETH_Test is PreBridgeETH {
+    /// @dev Tests that bridging ETH succeeds.
+    ///      Emits ETHDepositInitiated and ETHBridgeInitiated events.
+    ///      Calls depositTransaction on the OptimismPortal.
+    ///      Only EOA can call bridgeETH.
+    ///      ETH ends up in the optimismPortal.
+    function test_bridgeETH_succeeds() external {
+        _preBridgeETH({ isLegacy: false, value: 500 });
+        l1StandardBridge.bridgeETH{ value: 500 }(50000, hex"dead");
+        assertEq(address(optimismPortal).balance, 500);
+    }
+}
+
+contract L1StandardBridge_BridgeETH_TestFail is PreBridgeETH {
+    /// @dev Tests that bridging eth reverts with custom gas token.
+    function test_bridgeETH_customGasToken_reverts() external {
+        vm.prank(alice, alice);
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.expectRevert("StandardBridge: cannot bridge ETH with custom gas token");
+
+        l1StandardBridge.bridgeETH(50000, hex"dead");
+    }
 }
 
 contract PreBridgeETHTo is Bridge_Initializer {
     /// @dev Asserts the expected calls and events for bridging ETH to a different
     ///      address depending on whether the bridge call is legacy or not.
-    function _preBridgeETHTo(bool isLegacy) internal {
+    function _preBridgeETHTo(bool isLegacy, uint256 value) internal {
         assertEq(address(optimismPortal).balance, 0);
         uint256 nonce = l1CrossDomainMessenger.messageNonce();
         uint256 version = 0; // Internal constant in the OptimismPortal: DEPOSIT_VERSION
@@ -314,33 +357,35 @@ contract PreBridgeETHTo is Bridge_Initializer {
         if (isLegacy) {
             vm.expectCall(
                 address(l1StandardBridge),
-                600,
+                value,
                 abi.encodeWithSelector(l1StandardBridge.depositETHTo.selector, bob, 60000, hex"dead")
             );
         } else {
             vm.expectCall(
                 address(l1StandardBridge),
-                600,
+                value,
                 abi.encodeWithSelector(l1StandardBridge.bridgeETHTo.selector, bob, 60000, hex"dead")
             );
         }
 
         bytes memory message =
-            abi.encodeWithSelector(StandardBridge.finalizeBridgeETH.selector, alice, bob, 600, hex"dead");
+            abi.encodeWithSelector(StandardBridge.finalizeBridgeETH.selector, alice, bob, value, hex"dead");
 
         // the L1 bridge should call
         // L1CrossDomainMessenger.sendMessage
         vm.expectCall(
             address(l1CrossDomainMessenger),
-            abi.encodeWithSelector(CrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 60000)
+            abi.encodeWithSelector(
+                ICrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 60000
+            )
         );
 
         bytes memory innerMessage = abi.encodeWithSelector(
-            CrossDomainMessenger.relayMessage.selector,
+            ICrossDomainMessenger.relayMessage.selector,
             nonce,
             address(l1StandardBridge),
             address(l2StandardBridge),
-            600,
+            value,
             60000,
             message
         );
@@ -349,22 +394,22 @@ contract PreBridgeETHTo is Bridge_Initializer {
         vm.expectCall(
             address(optimismPortal),
             abi.encodeWithSelector(
-                OptimismPortal.depositTransaction.selector,
+                IOptimismPortal.depositTransaction.selector,
                 address(l2CrossDomainMessenger),
-                600,
+                value,
                 baseGas,
                 false,
                 innerMessage
             )
         );
 
-        bytes memory opaqueData = abi.encodePacked(uint256(600), uint256(600), baseGas, false, innerMessage);
+        bytes memory opaqueData = abi.encodePacked(uint256(value), uint256(value), baseGas, false, innerMessage);
 
         vm.expectEmit(address(l1StandardBridge));
-        emit ETHDepositInitiated(alice, bob, 600, hex"dead");
+        emit ETHDepositInitiated(alice, bob, value, hex"dead");
 
         vm.expectEmit(address(l1StandardBridge));
-        emit ETHBridgeInitiated(alice, bob, 600, hex"dead");
+        emit ETHBridgeInitiated(alice, bob, value, hex"dead");
 
         // OptimismPortal emits a TransactionDeposited event on `depositTransaction` call
         vm.expectEmit(address(optimismPortal));
@@ -376,7 +421,7 @@ contract PreBridgeETHTo is Bridge_Initializer {
 
         // SentMessageExtension1 event emitted by the CrossDomainMessenger
         vm.expectEmit(address(l1CrossDomainMessenger));
-        emit SentMessageExtension1(address(l1StandardBridge), 600);
+        emit SentMessageExtension1(address(l1StandardBridge), value);
 
         // deposit eth to bob
         vm.prank(alice, alice);
@@ -390,9 +435,29 @@ contract L1StandardBridge_DepositETHTo_Test is PreBridgeETHTo {
     ///      EOA or contract can call depositETHTo.
     ///      ETH ends up in the optimismPortal.
     function test_depositETHTo_succeeds() external {
-        _preBridgeETHTo({ isLegacy: true });
+        _preBridgeETHTo({ isLegacy: true, value: 600 });
         l1StandardBridge.depositETHTo{ value: 600 }(bob, 60000, hex"dead");
         assertEq(address(optimismPortal).balance, 600);
+    }
+}
+
+contract L1StandardBridge_DepositETHTo_TestFail is Bridge_Initializer {
+    /// @dev Tests that depositETHTo reverts with custom gas token.
+    function testFuzz_depositETHTo_customGasToken_reverts(
+        uint256 _value,
+        address _to,
+        uint32 _minGasLimit,
+        bytes calldata _extraData
+    )
+        external
+    {
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.deal(address(this), _value);
+        vm.expectRevert("StandardBridge: cannot bridge ETH with custom gas token");
+
+        l1StandardBridge.depositETHTo{ value: _value }(_to, _minGasLimit, _extraData);
     }
 }
 
@@ -403,13 +468,30 @@ contract L1StandardBridge_BridgeETHTo_Test is PreBridgeETHTo {
     ///      Only EOA can call bridgeETHTo.
     ///      ETH ends up in the optimismPortal.
     function test_bridgeETHTo_succeeds() external {
-        _preBridgeETHTo({ isLegacy: false });
+        _preBridgeETHTo({ isLegacy: false, value: 600 });
         l1StandardBridge.bridgeETHTo{ value: 600 }(bob, 60000, hex"dead");
         assertEq(address(optimismPortal).balance, 600);
     }
 }
 
-contract L1StandardBridge_DepositETHTo_TestFail is Bridge_Initializer { }
+contract L1StandardBridge_BridgeETHTo_TestFail is PreBridgeETHTo {
+    /// @dev Tests that bridging reverts with custom gas token.
+    function testFuzz_bridgeETHTo_customGasToken_reverts(
+        uint256 _value,
+        uint32 _minGasLimit,
+        bytes calldata _extraData
+    )
+        external
+    {
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.deal(address(this), _value);
+        vm.expectRevert("StandardBridge: cannot bridge ETH with custom gas token");
+
+        l1StandardBridge.bridgeETHTo{ value: _value }(bob, _minGasLimit, _extraData);
+    }
+}
 
 contract L1StandardBridge_DepositERC20_Test is Bridge_Initializer {
     using stdStorage for StdStorage;
@@ -447,11 +529,13 @@ contract L1StandardBridge_DepositERC20_Test is Bridge_Initializer {
         // the L1 bridge should call L1CrossDomainMessenger.sendMessage
         vm.expectCall(
             address(l1CrossDomainMessenger),
-            abi.encodeWithSelector(CrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 10000)
+            abi.encodeWithSelector(
+                ICrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 10000
+            )
         );
 
         bytes memory innerMessage = abi.encodeWithSelector(
-            CrossDomainMessenger.relayMessage.selector,
+            ICrossDomainMessenger.relayMessage.selector,
             nonce,
             address(l1StandardBridge),
             address(l2StandardBridge),
@@ -464,7 +548,7 @@ contract L1StandardBridge_DepositERC20_Test is Bridge_Initializer {
         vm.expectCall(
             address(optimismPortal),
             abi.encodeWithSelector(
-                OptimismPortal.depositTransaction.selector,
+                IOptimismPortal.depositTransaction.selector,
                 address(l2CrossDomainMessenger),
                 0,
                 baseGas,
@@ -530,7 +614,7 @@ contract L1StandardBridge_DepositERC20To_Test is Bridge_Initializer {
         );
 
         bytes memory innerMessage = abi.encodeWithSelector(
-            CrossDomainMessenger.relayMessage.selector,
+            ICrossDomainMessenger.relayMessage.selector,
             nonce,
             address(l1StandardBridge),
             address(l2StandardBridge),
@@ -569,13 +653,15 @@ contract L1StandardBridge_DepositERC20To_Test is Bridge_Initializer {
         // the L1 bridge should call L1CrossDomainMessenger.sendMessage
         vm.expectCall(
             address(l1CrossDomainMessenger),
-            abi.encodeWithSelector(CrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 10000)
+            abi.encodeWithSelector(
+                ICrossDomainMessenger.sendMessage.selector, address(l2StandardBridge), message, 10000
+            )
         );
         // The L1 XDM should call OptimismPortal.depositTransaction
         vm.expectCall(
             address(optimismPortal),
             abi.encodeWithSelector(
-                OptimismPortal.depositTransaction.selector,
+                IOptimismPortal.depositTransaction.selector,
                 address(l2CrossDomainMessenger),
                 0,
                 baseGas,
@@ -614,7 +700,7 @@ contract L1StandardBridge_FinalizeETHWithdrawal_Test is Bridge_Initializer {
 
         vm.mockCall(
             address(l1StandardBridge.messenger()),
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         // ensure that the messenger has ETH to call with
@@ -627,7 +713,29 @@ contract L1StandardBridge_FinalizeETHWithdrawal_Test is Bridge_Initializer {
     }
 }
 
-contract L1StandardBridge_FinalizeETHWithdrawal_TestFail is Bridge_Initializer { }
+contract L1StandardBridge_FinalizeETHWithdrawal_TestFail is Bridge_Initializer {
+    /// @dev Tests that finalizeETHWithdrawal reverts with custom gas token.
+    function testFuzz_finalizeETHWithdrawal_customGasToken_reverts(
+        uint256 _value,
+        bytes calldata _extraData
+    )
+        external
+    {
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.mockCall(
+            address(l1StandardBridge.messenger()),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
+        );
+        vm.deal(address(l1StandardBridge.messenger()), _value);
+        vm.prank(address(l1StandardBridge.messenger()));
+        vm.expectRevert("StandardBridge: cannot bridge ETH with custom gas token");
+
+        l1StandardBridge.finalizeETHWithdrawal{ value: _value }(alice, alice, _value, _extraData);
+    }
+}
 
 contract L1StandardBridge_FinalizeERC20Withdrawal_Test is Bridge_Initializer {
     using stdStorage for StdStorage;
@@ -657,7 +765,7 @@ contract L1StandardBridge_FinalizeERC20Withdrawal_Test is Bridge_Initializer {
 
         vm.mockCall(
             address(l1StandardBridge.messenger()),
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         vm.prank(address(l1StandardBridge.messenger()));
@@ -673,7 +781,7 @@ contract L1StandardBridge_FinalizeERC20Withdrawal_TestFail is Bridge_Initializer
     function test_finalizeERC20Withdrawal_notMessenger_reverts() external {
         vm.mockCall(
             address(l1StandardBridge.messenger()),
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         vm.prank(address(28));
@@ -685,7 +793,7 @@ contract L1StandardBridge_FinalizeERC20Withdrawal_TestFail is Bridge_Initializer
     function test_finalizeERC20Withdrawal_notOtherBridge_reverts() external {
         vm.mockCall(
             address(l1StandardBridge.messenger()),
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(address(0)))
         );
         vm.prank(address(l1StandardBridge.messenger()));
@@ -700,7 +808,7 @@ contract L1StandardBridge_FinalizeBridgeETH_Test is Bridge_Initializer {
         address messenger = address(l1StandardBridge.messenger());
         vm.mockCall(
             messenger,
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         vm.deal(messenger, 100);
@@ -714,12 +822,29 @@ contract L1StandardBridge_FinalizeBridgeETH_Test is Bridge_Initializer {
 }
 
 contract L1StandardBridge_FinalizeBridgeETH_TestFail is Bridge_Initializer {
+    /// @dev Tests that finalizing bridged reverts with custom gas token.
+    function testFuzz_finalizeBridgeETH_customGasToken_reverts(uint256 _value, bytes calldata _extraData) external {
+        vm.mockCall(
+            address(l1StandardBridge.messenger()),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
+        );
+        vm.deal(address(l1CrossDomainMessenger), _value);
+        vm.prank(address(l1CrossDomainMessenger));
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.expectRevert("StandardBridge: cannot bridge ETH with custom gas token");
+
+        l1StandardBridge.finalizeBridgeETH{ value: _value }(alice, alice, _value, _extraData);
+    }
+
     /// @dev Tests that finalizing bridged ETH reverts if the amount is incorrect.
     function test_finalizeBridgeETH_incorrectValue_reverts() external {
         address messenger = address(l1StandardBridge.messenger());
         vm.mockCall(
             messenger,
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         vm.deal(messenger, 100);
@@ -733,7 +858,7 @@ contract L1StandardBridge_FinalizeBridgeETH_TestFail is Bridge_Initializer {
         address messenger = address(l1StandardBridge.messenger());
         vm.mockCall(
             messenger,
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         vm.deal(messenger, 100);
@@ -747,7 +872,7 @@ contract L1StandardBridge_FinalizeBridgeETH_TestFail is Bridge_Initializer {
         address messenger = address(l1StandardBridge.messenger());
         vm.mockCall(
             messenger,
-            abi.encodeWithSelector(CrossDomainMessenger.xDomainMessageSender.selector),
+            abi.encodeWithSelector(ICrossDomainMessenger.xDomainMessageSender.selector),
             abi.encode(address(l1StandardBridge.OTHER_BRIDGE()))
         );
         vm.deal(messenger, 100);

@@ -60,20 +60,62 @@
     "label": "superchainConfig",
     "offset": 1,
     "slot": "53",
-    "type": "contract SuperchainConfig"
+    "type": "contract ISuperchainConfig"
   },
   {
     "bytes": "20",
     "label": "l2Oracle",
     "offset": 0,
     "slot": "54",
-    "type": "contract L2OutputOracle"
+    "type": "contract IL2OutputOracle"
   },
   {
     "bytes": "20",
     "label": "systemConfig",
     "offset": 0,
     "slot": "55",
-    "type": "contract SystemConfig"
+    "type": "contract ISystemConfig"
+  },
+  {
+    "bytes": "20",
+    "label": "spacer_56_0_20",
+    "offset": 0,
+    "slot": "56",
+    "type": "address"
+  },
+  {
+    "bytes": "32",
+    "label": "spacer_57_0_32",
+    "offset": 0,
+    "slot": "57",
+    "type": "bytes32"
+  },
+  {
+    "bytes": "32",
+    "label": "spacer_58_0_32",
+    "offset": 0,
+    "slot": "58",
+    "type": "bytes32"
+  },
+  {
+    "bytes": "32",
+    "label": "spacer_59_0_32",
+    "offset": 0,
+    "slot": "59",
+    "type": "bytes32"
+  },
+  {
+    "bytes": "32",
+    "label": "spacer_60_0_32",
+    "offset": 0,
+    "slot": "60",
+    "type": "bytes32"
+  },
+  {
+    "bytes": "32",
+    "label": "_balance",
+    "offset": 0,
+    "slot": "61",
+    "type": "uint256"
   }
 ]

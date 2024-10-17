@@ -74,7 +74,7 @@
     "name": "PORTAL",
     "outputs": [
       {
-        "internalType": "contract OptimismPortal",
+        "internalType": "contract IOptimismPortal",
         "name": "",
         "type": "address"
       }
@@ -180,13 +180,18 @@
   {
     "inputs": [
       {
-        "internalType": "contract SuperchainConfig",
+        "internalType": "contract ISuperchainConfig",
         "name": "_superchainConfig",
         "type": "address"
       },
       {
-        "internalType": "contract OptimismPortal",
+        "internalType": "contract IOptimismPortal",
         "name": "_portal",
+        "type": "address"
+      },
+      {
+        "internalType": "contract ISystemConfig",
+        "name": "_systemConfig",
         "type": "address"
       }
     ],
@@ -239,7 +244,7 @@
     "name": "portal",
     "outputs": [
       {
-        "internalType": "contract OptimismPortal",
+        "internalType": "contract IOptimismPortal",
         "name": "",
         "type": "address"
       }
@@ -332,7 +337,20 @@
     "name": "superchainConfig",
     "outputs": [
       {
-        "internalType": "contract SuperchainConfig",
+        "internalType": "contract ISuperchainConfig",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "systemConfig",
+    "outputs": [
+      {
+        "internalType": "contract ISystemConfig",
         "name": "",
         "type": "address"
       }

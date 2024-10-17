@@ -66,7 +66,7 @@ func buildSpanBatches(t *testing.T, parent *eth.L2BlockRef, singularBatches []*S
 	var spanBatches []Batch
 	idx := 0
 	for _, count := range blockCounts {
-		span := NewSpanBatch(singularBatches[idx : idx+count])
+		span := initializedSpanBatch(singularBatches[idx:idx+count], uint64(0), chainId)
 		spanBatches = append(spanBatches, span)
 		idx += count
 	}
@@ -147,6 +147,7 @@ func TestBatchQueue(t *testing.T) {
 		{"BatchQueueMissing", BatchQueueMissing},
 		{"BatchQueueAdvancedEpoch", BatchQueueAdvancedEpoch},
 		{"BatchQueueShuffle", BatchQueueShuffle},
+		{"BatchQueueResetOneBlockBeforeOrigin", BatchQueueResetOneBlockBeforeOrigin},
 	}
 	for _, test := range tests {
 		test := test
@@ -221,6 +222,67 @@ func BatchQueueNewOrigin(t *testing.T, batchType int) {
 	require.Nil(t, data)
 	require.Equal(t, io.EOF, err)
 	require.Equal(t, []eth.L1BlockRef{l1[2]}, bq.l1Blocks)
+	require.Equal(t, l1[2], bq.origin)
+}
+
+// BatchQueueResetOneBlockBeforeOrigin tests that the batch queue properly
+// prunes the l1Block recorded as part of a reset when the starting origin
+// is exactly one block prior to the safe head origin.
+func BatchQueueResetOneBlockBeforeOrigin(t *testing.T, batchType int) {
+	log := testlog.Logger(t, log.LevelTrace)
+	l1 := L1Chain([]uint64{10, 15, 20, 25})
+	safeHead := eth.L2BlockRef{
+		Hash:           mockHash(10, 2),
+		Number:         0,
+		ParentHash:     common.Hash{},
+		Time:           20,
+		L1Origin:       l1[1].ID(),
+		SequenceNumber: 0,
+	}
+	cfg := &rollup.Config{
+		Genesis: rollup.Genesis{
+			L2Time: 10,
+		},
+		BlockTime:         2,
+		MaxSequencerDrift: 600,
+		SeqWindowSize:     2,
+		DeltaTime:         getDeltaTime(batchType),
+	}
+
+	input := &fakeBatchQueueInput{
+		batches: []Batch{nil},
+		errors:  []error{io.EOF},
+		origin:  l1[0],
+	}
+
+	bq := NewBatchQueue(log, cfg, input, nil)
+	_ = bq.Reset(context.Background(), l1[0], eth.SystemConfig{})
+	require.Equal(t, []eth.L1BlockRef{l1[0]}, bq.l1Blocks)
+
+	// Prev Origin: 0; Safehead Origin: 1; Internal Origin: 0
+	// Should return no data but keep the same origin
+	data, _, err := bq.NextBatch(context.Background(), safeHead)
+	require.Nil(t, data)
+	require.Equal(t, io.EOF, err)
+	require.Equal(t, []eth.L1BlockRef{l1[0]}, bq.l1Blocks)
+	require.Equal(t, l1[0], bq.origin)
+
+	// Prev Origin: 1; Safehead Origin: 1; Internal Origin: 0
+	// Should record new l1 origin in l1blocks, prune block 0 and advance internal origin
+	input.origin = l1[1]
+	data, _, err = bq.NextBatch(context.Background(), safeHead)
+	require.Nil(t, data)
+	require.Equalf(t, io.EOF, err, "expected io.EOF but got %v", err)
+	require.Equal(t, []eth.L1BlockRef{l1[1]}, bq.l1Blocks)
+	require.Equal(t, l1[1], bq.origin)
+
+	// Prev Origin: 2; Safehead Origin: 1; Internal Origin: 1
+	// Should add to l1Blocks + advance internal origin
+	input.origin = l1[2]
+	data, _, err = bq.NextBatch(context.Background(), safeHead)
+	require.Nil(t, data)
+	require.Equal(t, io.EOF, err)
+	require.Equal(t, []eth.L1BlockRef{l1[1], l1[2]}, bq.l1Blocks)
 	require.Equal(t, l1[2], bq.origin)
 }
 
@@ -767,7 +829,7 @@ func TestBatchQueueOverlappingSpanBatch(t *testing.T) {
 	var inputBatches []Batch
 	batchSize := 3
 	for i := 0; i < len(expectedOutputBatches)-batchSize; i++ {
-		inputBatches = append(inputBatches, NewSpanBatch(expectedOutputBatches[i:i+batchSize]))
+		inputBatches = append(inputBatches, initializedSpanBatch(expectedOutputBatches[i:i+batchSize], uint64(0), chainId))
 	}
 	inputBatches = append(inputBatches, nil)
 	// inputBatches:
@@ -872,12 +934,12 @@ func TestBatchQueueComplex(t *testing.T) {
 	inputErrors := []error{nil, nil, nil, nil, nil, nil, io.EOF}
 	// batches will be returned by fakeBatchQueueInput
 	inputBatches := []Batch{
-		NewSpanBatch(expectedOutputBatches[0:2]), // [6, 8] - no overlap
-		expectedOutputBatches[2],                 // [10] - no overlap
-		NewSpanBatch(expectedOutputBatches[1:4]), // [8, 10, 12] - overlapped blocks: 8 or 8, 10
-		expectedOutputBatches[4],                 // [14] - no overlap
-		NewSpanBatch(expectedOutputBatches[4:6]), // [14, 16] - overlapped blocks: nothing or 14
-		NewSpanBatch(expectedOutputBatches[6:9]), // [18, 20, 22] - no overlap
+		initializedSpanBatch(expectedOutputBatches[0:2], uint64(0), chainId), // [6, 8] - no overlap
+		expectedOutputBatches[2], // [10] - no overlap
+		initializedSpanBatch(expectedOutputBatches[1:4], uint64(0), chainId), // [8, 10, 12] - overlapped blocks: 8 or 8, 10
+		expectedOutputBatches[4], // [14] - no overlap
+		initializedSpanBatch(expectedOutputBatches[4:6], uint64(0), chainId), // [14, 16] - overlapped blocks: nothing or 14
+		initializedSpanBatch(expectedOutputBatches[6:9], uint64(0), chainId), // [18, 20, 22] - no overlap
 	}
 
 	// Shuffle the order of input batches
@@ -979,7 +1041,7 @@ func TestBatchQueueResetSpan(t *testing.T) {
 	}
 
 	input := &fakeBatchQueueInput{
-		batches: []Batch{NewSpanBatch(singularBatches)},
+		batches: []Batch{initializedSpanBatch(singularBatches, uint64(0), chainId)},
 		errors:  []error{nil},
 		origin:  l1[2],
 	}

@@ -13,10 +13,13 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
-var ErrMaxFrameSizeTooSmall = errors.New("maxSize is too small to fit the fixed frame overhead")
-var ErrNotDepositTx = errors.New("first transaction in block is not a deposit tx")
-var ErrTooManyRLPBytes = errors.New("batch would cause RLP bytes to go over limit")
-var ErrChannelOutAlreadyClosed = errors.New("channel-out already closed")
+var (
+	ErrMaxFrameSizeTooSmall    = errors.New("maxSize is too small to fit the fixed frame overhead")
+	ErrNotDepositTx            = errors.New("first transaction in block is not a deposit tx")
+	ErrTooManyRLPBytes         = errors.New("batch would cause RLP bytes to go over limit")
+	ErrChannelOutAlreadyClosed = errors.New("channel-out already closed")
+	ErrCompressorFull          = errors.New("compressor is full")
+)
 
 // FrameV0OverHeadSize is the absolute minimum size of a frame.
 // This is the fixed overhead frame size, calculated as specified
@@ -25,11 +28,9 @@ var ErrChannelOutAlreadyClosed = errors.New("channel-out already closed")
 // [Frame Format]: https://github.com/ethereum-optimism/specs/blob/main/specs/protocol/derivation.md#frame-format
 const FrameV0OverHeadSize = 23
 
-var CompressorFullErr = errors.New("compressor is full")
-
 type Compressor interface {
 	// Writer is used to write uncompressed data which will be compressed. Should return
-	// CompressorFullErr if the compressor is full and no more data should be written.
+	// ErrCompressorFull if the compressor is full and no more data should be written.
 	io.Writer
 	// Closer Close function should be called before reading any data.
 	io.Closer
@@ -43,34 +44,22 @@ type Compressor interface {
 	// Flush flushes any uncompressed data to the compression buffer. This will result in a
 	// non-optimal compression ratio.
 	Flush() error
-	// FullErr returns CompressorFullErr if the compressor is known to be full. Note that
+	// FullErr returns ErrCompressorFull if the compressor is known to be full. Note that
 	// calls to Write will fail if an error is returned from this method, but calls to Write
-	// can still return CompressorFullErr even if this does not.
+	// can still return ErrCompressorFull even if this does not.
 	FullErr() error
 }
 
 type ChannelOut interface {
 	ID() ChannelID
 	Reset() error
-	AddBlock(*rollup.Config, *types.Block) (uint64, error)
-	AddSingularBatch(*SingularBatch, uint64) (uint64, error)
+	AddBlock(*rollup.Config, *types.Block) (*L1BlockInfo, error)
 	InputBytes() int
 	ReadyBytes() int
 	Flush() error
 	FullErr() error
 	Close() error
 	OutputFrame(*bytes.Buffer, uint64) (uint16, error)
-}
-
-func NewChannelOut(batchType uint, compress Compressor, spanBatchBuilder *SpanBatchBuilder) (ChannelOut, error) {
-	switch batchType {
-	case SingularBatchType:
-		return NewSingularChannelOut(compress)
-	case SpanBatchType:
-		return NewSpanChannelOut(compress, spanBatchBuilder)
-	default:
-		return nil, fmt.Errorf("unrecognized batch type: %d", batchType)
-	}
 }
 
 type SingularChannelOut struct {
@@ -84,18 +73,21 @@ type SingularChannelOut struct {
 	compress Compressor
 
 	closed bool
+
+	chainSpec *rollup.ChainSpec
 }
 
 func (co *SingularChannelOut) ID() ChannelID {
 	return co.id
 }
 
-func NewSingularChannelOut(compress Compressor) (*SingularChannelOut, error) {
+func NewSingularChannelOut(compress Compressor, chainSpec *rollup.ChainSpec) (*SingularChannelOut, error) {
 	c := &SingularChannelOut{
 		id:        ChannelID{},
 		frame:     0,
 		rlpLength: 0,
 		compress:  compress,
+		chainSpec: chainSpec,
 	}
 	_, err := rand.Read(c.id[:])
 	if err != nil {
@@ -114,50 +106,52 @@ func (co *SingularChannelOut) Reset() error {
 	return err
 }
 
-// AddBlock adds a block to the channel. It returns the RLP encoded byte size
+// AddBlock adds a block to the channel. It returns the block's L1BlockInfo
 // and an error if there is a problem adding the block. The only sentinel error
 // that it returns is ErrTooManyRLPBytes. If this error is returned, the channel
 // should be closed and a new one should be made.
-func (co *SingularChannelOut) AddBlock(rollupCfg *rollup.Config, block *types.Block) (uint64, error) {
+func (co *SingularChannelOut) AddBlock(rollupCfg *rollup.Config, block *types.Block) (*L1BlockInfo, error) {
 	if co.closed {
-		return 0, ErrChannelOutAlreadyClosed
+		return nil, ErrChannelOutAlreadyClosed
 	}
 
 	batch, l1Info, err := BlockToSingularBatch(rollupCfg, block)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("converting block to batch: %w", err)
 	}
-	return co.AddSingularBatch(batch, l1Info.SequenceNumber)
+	return l1Info, co.addSingularBatch(batch, l1Info.SequenceNumber)
 }
 
-// AddSingularBatch adds a batch to the channel. It returns the RLP encoded byte size
-// and an error if there is a problem adding the batch. The only sentinel error
+// addSingularBatch adds a batch to the channel. It returns
+// an error if there is a problem adding the batch. The only sentinel error
 // that it returns is ErrTooManyRLPBytes. If this error is returned, the channel
 // should be closed and a new one should be made.
-//
-// AddSingularBatch should be used together with BlockToBatch if you need to access the
-// BatchData before adding a block to the channel. It isn't possible to access
-// the batch data with AddBlock.
-func (co *SingularChannelOut) AddSingularBatch(batch *SingularBatch, _ uint64) (uint64, error) {
+func (co *SingularChannelOut) addSingularBatch(batch *SingularBatch, _ uint64) error {
 	if co.closed {
-		return 0, ErrChannelOutAlreadyClosed
+		return ErrChannelOutAlreadyClosed
 	}
 
 	// We encode to a temporary buffer to determine the encoded length to
 	// ensure that the total size of all RLP elements is less than or equal to MAX_RLP_BYTES_PER_CHANNEL
 	var buf bytes.Buffer
 	if err := rlp.Encode(&buf, NewBatchData(batch)); err != nil {
-		return 0, err
+		return err
 	}
-	if co.rlpLength+buf.Len() > MaxRLPBytesPerChannel {
-		return 0, fmt.Errorf("could not add %d bytes to channel of %d bytes, max is %d. err: %w",
-			buf.Len(), co.rlpLength, MaxRLPBytesPerChannel, ErrTooManyRLPBytes)
+
+	// Fjord increases the max RLP bytes per channel. Activation of this change in the derivation pipeline
+	// is dependent on the timestamp of the L1 block that this channel got included in. So using the timestamp
+	// of the current batch guarantees that this channel will be included in an L1 block with a timestamp well after
+	// the Fjord activation.
+	maxRLPBytesPerChannel := co.chainSpec.MaxRLPBytesPerChannel(batch.Timestamp)
+	if co.rlpLength+buf.Len() > int(maxRLPBytesPerChannel) {
+		return fmt.Errorf("could not add %d bytes to channel of %d bytes, max is %d. err: %w",
+			buf.Len(), co.rlpLength, maxRLPBytesPerChannel, ErrTooManyRLPBytes)
 	}
 	co.rlpLength += buf.Len()
 
 	// avoid using io.Copy here, because we need all or nothing
-	written, err := co.compress.Write(buf.Bytes())
-	return uint64(written), err
+	_, err := co.compress.Write(buf.Bytes())
+	return err
 }
 
 // InputBytes returns the total amount of RLP-encoded input bytes.

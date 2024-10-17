@@ -3,19 +3,19 @@ pragma solidity 0.8.15;
 
 // Testing utilities
 import { Bridge_Initializer } from "test/setup/Bridge_Initializer.sol";
-import { Reverter, ConfigurableCaller } from "test/mocks/Callers.sol";
+import { Reverter } from "test/mocks/Callers.sol";
 
 // Libraries
 import { AddressAliasHelper } from "src/vendor/AddressAliasHelper.sol";
 import { Predeploys } from "src/libraries/Predeploys.sol";
 import { Hashing } from "src/libraries/Hashing.sol";
 import { Encoding } from "src/libraries/Encoding.sol";
-import { Constants } from "src/libraries/Constants.sol";
 
 // Target contract dependencies
-import { L1CrossDomainMessenger } from "src/L1/L1CrossDomainMessenger.sol";
-import { OptimismPortal } from "src/L1/OptimismPortal.sol";
-import { SuperchainConfig } from "src/L1/SuperchainConfig.sol";
+import { IL1CrossDomainMessenger } from "src/L1/interfaces/IL1CrossDomainMessenger.sol";
+import { IOptimismPortal } from "src/L1/interfaces/IOptimismPortal.sol";
+import { ISuperchainConfig } from "src/L1/interfaces/ISuperchainConfig.sol";
+import { ISystemConfig } from "src/L1/interfaces/ISystemConfig.sol";
 
 contract L1CrossDomainMessenger_Test is Bridge_Initializer {
     /// @dev The receiver address
@@ -28,7 +28,7 @@ contract L1CrossDomainMessenger_Test is Bridge_Initializer {
     /// @notice Marked virtual to be overridden in
     ///         test/kontrol/deployment/DeploymentSummary.t.sol
     function test_constructor_succeeds() external virtual {
-        L1CrossDomainMessenger impl = L1CrossDomainMessenger(deploy.mustGetAddress("L1CrossDomainMessenger"));
+        IL1CrossDomainMessenger impl = IL1CrossDomainMessenger(deploy.mustGetAddress("L1CrossDomainMessenger"));
         assertEq(address(impl.superchainConfig()), address(0));
         assertEq(address(impl.PORTAL()), address(0));
         assertEq(address(impl.portal()), address(0));
@@ -37,7 +37,7 @@ contract L1CrossDomainMessenger_Test is Bridge_Initializer {
     }
 
     /// @dev Tests that the proxy is initialized correctly.
-    function test_initialize_succeeds() external {
+    function test_initialize_succeeds() external view {
         assertEq(address(l1CrossDomainMessenger.superchainConfig()), address(superchainConfig));
         assertEq(address(l1CrossDomainMessenger.PORTAL()), address(optimismPortal));
         assertEq(address(l1CrossDomainMessenger.portal()), address(optimismPortal));
@@ -46,7 +46,7 @@ contract L1CrossDomainMessenger_Test is Bridge_Initializer {
     }
 
     /// @dev Tests that the version can be decoded from the message nonce.
-    function test_messageVersion_succeeds() external {
+    function test_messageVersion_succeeds() external view {
         (, uint16 version) = Encoding.decodeVersionedNonce(l1CrossDomainMessenger.messageNonce());
         assertEq(version, l1CrossDomainMessenger.MESSAGE_VERSION());
     }
@@ -59,7 +59,7 @@ contract L1CrossDomainMessenger_Test is Bridge_Initializer {
         vm.expectCall(
             address(optimismPortal),
             abi.encodeWithSelector(
-                OptimismPortal.depositTransaction.selector,
+                IOptimismPortal.depositTransaction.selector,
                 Predeploys.L2_CROSS_DOMAIN_MESSENGER,
                 0,
                 l1CrossDomainMessenger.baseGas(hex"ff", 100),
@@ -604,7 +604,7 @@ contract L1CrossDomainMessenger_Test is Bridge_Initializer {
 
     /// @dev Tests that the superchain config is called by the messengers paused function
     function test_pause_callsSuperchainConfig_succeeds() external {
-        vm.expectCall(address(superchainConfig), abi.encodeWithSelector(SuperchainConfig.paused.selector));
+        vm.expectCall(address(superchainConfig), abi.encodeWithSelector(ISuperchainConfig.paused.selector));
         l1CrossDomainMessenger.paused();
     }
 
@@ -618,6 +618,121 @@ contract L1CrossDomainMessenger_Test is Bridge_Initializer {
 
         assertTrue(l1CrossDomainMessenger.paused());
         assertEq(l1CrossDomainMessenger.paused(), superchainConfig.paused());
+    }
+
+    /// @dev Tests that sendMessage succeeds with a custom gas token when the call value is zero.
+    function test_sendMessage_customGasToken_noValue_succeeds() external {
+        // Mock the gasPayingToken function to return a custom gas token
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(18))
+        );
+
+        // deposit transaction on the optimism portal should be called
+        vm.expectCall(
+            address(optimismPortal),
+            abi.encodeWithSelector(
+                IOptimismPortal.depositTransaction.selector,
+                Predeploys.L2_CROSS_DOMAIN_MESSENGER,
+                0,
+                l1CrossDomainMessenger.baseGas(hex"ff", 100),
+                false,
+                Encoding.encodeCrossDomainMessage(
+                    l1CrossDomainMessenger.messageNonce(), alice, recipient, 0, 100, hex"ff"
+                )
+            )
+        );
+
+        // TransactionDeposited event
+        vm.expectEmit(address(optimismPortal));
+        emitTransactionDeposited(
+            AddressAliasHelper.applyL1ToL2Alias(address(l1CrossDomainMessenger)),
+            Predeploys.L2_CROSS_DOMAIN_MESSENGER,
+            0,
+            0,
+            l1CrossDomainMessenger.baseGas(hex"ff", 100),
+            false,
+            Encoding.encodeCrossDomainMessage(l1CrossDomainMessenger.messageNonce(), alice, recipient, 0, 100, hex"ff")
+        );
+
+        // SentMessage event
+        vm.expectEmit(address(l1CrossDomainMessenger));
+        emit SentMessage(recipient, alice, hex"ff", l1CrossDomainMessenger.messageNonce(), 100);
+
+        // SentMessageExtension1 event
+        vm.expectEmit(address(l1CrossDomainMessenger));
+        emit SentMessageExtension1(alice, 0);
+
+        vm.prank(alice);
+        l1CrossDomainMessenger.sendMessage(recipient, hex"ff", uint32(100));
+    }
+
+    /// @dev Tests that the sendMessage reverts when call value is non-zero with custom gas token.
+    function test_sendMessage_customGasToken_withValue_reverts() external {
+        // Mock the gasPayingToken function to return a custom gas token
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+
+        vm.expectRevert("CrossDomainMessenger: cannot send value with custom gas token");
+        l1CrossDomainMessenger.sendMessage{ value: 1 }(recipient, hex"aa", uint32(500_000));
+    }
+
+    /// @dev Tests that the relayMessage succeeds with a custom gas token when the call value is zero.
+    function test_relayMessage_customGasToken_noValue_succeeds() external {
+        // Mock the gasPayingToken function to return a custom gas token
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+
+        address target = address(0xabcd);
+        address sender = Predeploys.L2_CROSS_DOMAIN_MESSENGER;
+
+        vm.expectCall(target, hex"1111");
+
+        // set the value of op.l2Sender() to be the L2 Cross Domain Messenger.
+        vm.store(address(optimismPortal), bytes32(senderSlotIndex), bytes32(abi.encode(sender)));
+        vm.prank(address(optimismPortal));
+
+        vm.expectEmit(address(l1CrossDomainMessenger));
+
+        bytes32 hash = Hashing.hashCrossDomainMessage(
+            Encoding.encodeVersionedNonce({ _nonce: 0, _version: 1 }), sender, target, 0, 0, hex"1111"
+        );
+
+        emit RelayedMessage(hash);
+
+        l1CrossDomainMessenger.relayMessage(
+            Encoding.encodeVersionedNonce({ _nonce: 0, _version: 1 }), // nonce
+            sender,
+            target,
+            0, // value
+            0,
+            hex"1111"
+        );
+
+        // the message hash is in the successfulMessages mapping
+        assertTrue(l1CrossDomainMessenger.successfulMessages(hash));
+        // it is not in the received messages mapping
+        assertEq(l1CrossDomainMessenger.failedMessages(hash), false);
+    }
+
+    /// @dev Tests that the relayMessage reverts when call value is non-zero with custom gas token.
+    ///      The L2CrossDomainMessenger contract cannot `sendMessage` with value when using a custom gas token.
+    function test_relayMessage_customGasToken_withValue_reverts() external virtual {
+        // Mock the gasPayingToken function to return a custom gas token
+        vm.mockCall(
+            address(systemConfig), abi.encodeWithSignature("gasPayingToken()"), abi.encode(address(1), uint8(2))
+        );
+        vm.expectRevert("CrossDomainMessenger: value must be zero unless message is from a system address");
+
+        l1CrossDomainMessenger.relayMessage{ value: 1 }(
+            Encoding.encodeVersionedNonce({ _nonce: 0, _version: 1 }),
+            address(0xabcd),
+            address(0xabcd),
+            1, // value
+            0,
+            hex"1111"
+        );
     }
 }
 
@@ -653,7 +768,9 @@ contract L1CrossDomainMessenger_ReinitReentryTest is Bridge_Initializer {
             vm.store(address(l1CrossDomainMessenger), 0, bytes32(uint256(0)));
 
             // call the initializer function
-            l1CrossDomainMessenger.initialize(SuperchainConfig(superchainConfig), OptimismPortal(optimismPortal));
+            l1CrossDomainMessenger.initialize(
+                ISuperchainConfig(superchainConfig), IOptimismPortal(optimismPortal), ISystemConfig(systemConfig)
+            );
 
             // attempt to re-replay the withdrawal
             vm.expectEmit(address(l1CrossDomainMessenger));

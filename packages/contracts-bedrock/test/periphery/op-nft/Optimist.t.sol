@@ -3,28 +3,13 @@ pragma solidity >=0.6.2 <0.9.0;
 
 // Testing utilities
 import { Test } from "forge-std/Test.sol";
+import { IMulticall3 } from "forge-std/interfaces/IMulticall3.sol";
 import { AttestationStation } from "src/periphery/op-nft/AttestationStation.sol";
 import { Optimist } from "src/periphery/op-nft/Optimist.sol";
 import { OptimistAllowlist } from "src/periphery/op-nft/OptimistAllowlist.sol";
 import { OptimistInviter } from "src/periphery/op-nft/OptimistInviter.sol";
 import { OptimistInviterHelper } from "test/mocks/OptimistInviterHelper.sol";
-import { Strings } from "@openzeppelin/contracts/utils/Strings.sol";
 import { IERC721 } from "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-
-interface IMulticall3 {
-    struct Call3 {
-        address target;
-        bool allowFailure;
-        bytes callData;
-    }
-
-    struct Result {
-        bool success;
-        bytes returnData;
-    }
-
-    function aggregate3(Call3[] calldata calls) external payable returns (Result[] memory returnData);
-}
 
 library Multicall {
     bytes internal constant code =
@@ -203,7 +188,7 @@ contract Optimist_Initializer is Test {
 
 contract OptimistTest is Optimist_Initializer {
     /// @notice Check that constructor and initializer parameters are correctly set.
-    function test_initialize_succeeds() external {
+    function test_initialize_succeeds() external view {
         // expect name to be set
         assertEq(optimist.name(), name);
         // expect symbol to be set
@@ -498,7 +483,7 @@ contract OptimistTest is Optimist_Initializer {
     }
 
     /// @notice Should support ERC-721 interface.
-    function test_supportsInterface_returnsCorrectInterfaceForERC721_succeeds() external {
+    function test_supportsInterface_returnsCorrectInterfaceForERC721_succeeds() external view {
         bytes4 iface721 = type(IERC721).interfaceId;
         // check that it supports ERC-721 interface
         assertEq(optimist.supportsInterface(iface721), true);

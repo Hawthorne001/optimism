@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	op_e2e "github.com/ethereum-optimism/optimism/op-e2e"
+
 	"github.com/ethereum-optimism/optimism/op-e2e/e2eutils/disputegame"
 	preimage "github.com/ethereum-optimism/optimism/op-preimage"
 	"github.com/ethereum-optimism/optimism/op-program/client"
@@ -32,7 +33,7 @@ func TestLocalPreimages(t *testing.T) {
 			op_e2e.InitParallel(t, op_e2e.UsesCannon)
 
 			ctx := context.Background()
-			sys, _ := startFaultDisputeSystem(t)
+			sys, _ := StartFaultDisputeSystem(t)
 			t.Cleanup(sys.Close)
 
 			disputeGameFactory := disputegame.NewFactoryHelper(t, ctx, sys)

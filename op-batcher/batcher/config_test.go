@@ -1,11 +1,15 @@
 package batcher_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/ethereum-optimism/optimism/op-batcher/batcher"
+	"github.com/ethereum-optimism/optimism/op-batcher/compressor"
 	"github.com/ethereum-optimism/optimism/op-batcher/flags"
+	"github.com/ethereum-optimism/optimism/op-node/rollup/derive"
+	"github.com/ethereum-optimism/optimism/op-service/eth"
 	"github.com/ethereum-optimism/optimism/op-service/log"
 	"github.com/ethereum-optimism/optimism/op-service/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/oppprof"
@@ -24,6 +28,8 @@ func validBatcherConfig() batcher.CLIConfig {
 		PollInterval:           time.Second,
 		MaxPendingTransactions: 0,
 		MaxL1TxSize:            10,
+		TargetNumFrames:        1,
+		Compressor:             "shadow",
 		Stopped:                false,
 		BatchType:              0,
 		DataAvailabilityType:   flags.CalldataType,
@@ -32,7 +38,8 @@ func validBatcherConfig() batcher.CLIConfig {
 		MetricsConfig:          metrics.DefaultCLIConfig(),
 		PprofConfig:            oppprof.DefaultCLIConfig(),
 		// The compressor config is not checked in config.Check()
-		RPC: rpc.DefaultCLIConfig(),
+		RPC:             rpc.DefaultCLIConfig(),
+		CompressionAlgo: derive.Zlib,
 	}
 }
 
@@ -86,6 +93,27 @@ func TestBatcherConfig(t *testing.T) {
 			name:      "invalid batch submission policy",
 			override:  func(c *batcher.CLIConfig) { c.DataAvailabilityType = "foo" },
 			errString: "unknown data availability type: \"foo\"",
+		},
+		{
+			name:      "zero TargetNumFrames",
+			override:  func(c *batcher.CLIConfig) { c.TargetNumFrames = 0 },
+			errString: "TargetNumFrames must be at least 1",
+		},
+		{
+			name: fmt.Sprintf("larger %d TargetNumFrames for blobs", eth.MaxBlobsPerBlobTx),
+			override: func(c *batcher.CLIConfig) {
+				c.TargetNumFrames = eth.MaxBlobsPerBlobTx + 1
+				c.DataAvailabilityType = flags.BlobsType
+			},
+			errString: fmt.Sprintf("too many frames for blob transactions, max %d", eth.MaxBlobsPerBlobTx),
+		},
+		{
+			name: "invalid compr ratio for ratio compressor",
+			override: func(c *batcher.CLIConfig) {
+				c.ApproxComprRatio = 4.2
+				c.Compressor = compressor.RatioKind
+			},
+			errString: "invalid ApproxComprRatio 4.2 for ratio compressor",
 		},
 	}
 
