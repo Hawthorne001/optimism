@@ -13,11 +13,12 @@ import (
 )
 
 const (
-	BlobSize        = 4096 * 32
-	MaxBlobDataSize = (4*31+3)*1024 - 4
-	EncodingVersion = 0
-	VersionOffset   = 1    // offset of the version byte in the blob encoding
-	Rounds          = 1024 // number of encode/decode rounds
+	BlobSize          = 4096 * 32
+	MaxBlobDataSize   = (4*31+3)*1024 - 4
+	EncodingVersion   = 0
+	VersionOffset     = 1    // offset of the version byte in the blob encoding
+	Rounds            = 1024 // number of encode/decode rounds
+	MaxBlobsPerBlobTx = params.MaxBlobGasPerBlock / params.BlobTxBlobGasPerBlob
 )
 
 var (
@@ -58,26 +59,20 @@ func (b *Blob) TerminalString() string {
 }
 
 func (b *Blob) ComputeKZGCommitment() (kzg4844.Commitment, error) {
-	return kzg4844.BlobToCommitment(*b.KZGBlob())
+	return kzg4844.BlobToCommitment(b.KZGBlob())
 }
 
 // KZGToVersionedHash computes the "blob hash" (a.k.a. versioned-hash) of a blob-commitment, as used in a blob-tx.
 // We implement it here because it is unfortunately not (currently) exposed by geth.
 func KZGToVersionedHash(commitment kzg4844.Commitment) (out common.Hash) {
-	// EIP-4844 spec:
-	//	def kzg_to_versioned_hash(commitment: KZGCommitment) -> VersionedHash:
-	//		return VERSIONED_HASH_VERSION_KZG + sha256(commitment)[1:]
-	h := sha256.New()
-	h.Write(commitment[:])
-	_ = h.Sum(out[:0])
-	out[0] = params.BlobTxHashVersion
-	return out
+	hasher := sha256.New()
+	return kzg4844.CalcBlobHashV1(hasher, &commitment)
 }
 
 // VerifyBlobProof verifies that the given blob and proof corresponds to the given commitment,
 // returning error if the verification fails.
 func VerifyBlobProof(blob *Blob, commitment kzg4844.Commitment, proof kzg4844.Proof) error {
-	return kzg4844.VerifyBlobProof(*blob.KZGBlob(), commitment, proof)
+	return kzg4844.VerifyBlobProof(blob.KZGBlob(), commitment, proof)
 }
 
 // FromData encodes the given input data into this blob. The encoding scheme is as follows:

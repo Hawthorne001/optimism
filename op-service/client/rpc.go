@@ -8,14 +8,16 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/ethereum-optimism/optimism/op-service/retry"
-	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/log"
-	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 
-	"github.com/ethereum-optimism/optimism/op-node/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+
+	"github.com/ethereum-optimism/optimism/op-service/metrics"
+	"github.com/ethereum-optimism/optimism/op-service/retry"
 )
 
 var httpRegex = regexp.MustCompile("^http(s)?://")
@@ -33,9 +35,26 @@ type rpcConfig struct {
 	backoffAttempts  int
 	limit            float64
 	burst            int
+	lazy             bool
+	callTimeout      time.Duration
+	batchCallTimeout time.Duration
 }
 
 type RPCOption func(cfg *rpcConfig) error
+
+func WithCallTimeout(d time.Duration) RPCOption {
+	return func(cfg *rpcConfig) error {
+		cfg.callTimeout = d
+		return nil
+	}
+}
+
+func WithBatchCallTimeout(d time.Duration) RPCOption {
+	return func(cfg *rpcConfig) error {
+		cfg.batchCallTimeout = d
+		return nil
+	}
+}
 
 // WithDialBackoff configures the number of attempts for the initial dial to the RPC,
 // attempts are executed with an exponential backoff strategy.
@@ -72,6 +91,17 @@ func WithRateLimit(rateLimit float64, burst int) RPCOption {
 	}
 }
 
+// WithLazyDial makes the RPC client initialization defer the initial connection attempt,
+// and defer to later RPC requests upon subsequent dial errors.
+// Any dial-backoff option will be ignored if this option is used.
+// This is implemented by wrapping the inner RPC client with a LazyRPC.
+func WithLazyDial() RPCOption {
+	return func(cfg *rpcConfig) error {
+		cfg.lazy = true
+		return nil
+	}
+}
+
 // NewRPC returns the correct client.RPC instance for a given RPC url.
 func NewRPC(ctx context.Context, lgr log.Logger, addr string, opts ...RPCOption) (RPC, error) {
 	var cfg rpcConfig
@@ -84,13 +114,23 @@ func NewRPC(ctx context.Context, lgr log.Logger, addr string, opts ...RPCOption)
 	if cfg.backoffAttempts < 1 { // default to at least 1 attempt, or it always fails to dial.
 		cfg.backoffAttempts = 1
 	}
-
-	underlying, err := dialRPCClientWithBackoff(ctx, lgr, addr, cfg.backoffAttempts, cfg.gethRPCOptions...)
-	if err != nil {
-		return nil, err
+	if cfg.callTimeout == 0 {
+		cfg.callTimeout = 10 * time.Second
+	}
+	if cfg.batchCallTimeout == 0 {
+		cfg.batchCallTimeout = 20 * time.Second
 	}
 
-	var wrapped RPC = &BaseRPCClient{c: underlying}
+	var wrapped RPC
+	if cfg.lazy {
+		wrapped = NewLazyRPC(addr, cfg.gethRPCOptions...)
+	} else {
+		underlying, err := dialRPCClientWithBackoff(ctx, lgr, addr, cfg.backoffAttempts, cfg.gethRPCOptions...)
+		if err != nil {
+			return nil, err
+		}
+		wrapped = &BaseRPCClient{c: underlying, callTimeout: cfg.callTimeout, batchCallTimeout: cfg.batchCallTimeout}
+	}
 
 	if cfg.limit != 0 {
 		wrapped = NewRateLimitingClient(wrapped, rate.Limit(cfg.limit), cfg.burst)
@@ -111,7 +151,7 @@ func NewRPCWithClient(ctx context.Context, lgr log.Logger, addr string, underlyi
 func dialRPCClientWithBackoff(ctx context.Context, log log.Logger, addr string, attempts int, opts ...rpc.ClientOption) (*rpc.Client, error) {
 	bOff := retry.Exponential()
 	return retry.Do(ctx, attempts, bOff, func() (*rpc.Client, error) {
-		if !IsURLAvailable(addr) {
+		if !IsURLAvailable(ctx, addr) {
 			log.Warn("failed to dial address, but may connect later", "addr", addr)
 			return nil, fmt.Errorf("address unavailable (%s)", addr)
 		}
@@ -123,7 +163,7 @@ func dialRPCClientWithBackoff(ctx context.Context, log log.Logger, addr string, 
 	})
 }
 
-func IsURLAvailable(address string) bool {
+func IsURLAvailable(ctx context.Context, address string) bool {
 	u, err := url.Parse(address)
 	if err != nil {
 		return false
@@ -140,7 +180,8 @@ func IsURLAvailable(address string) bool {
 			return true
 		}
 	}
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		return false
 	}
@@ -152,11 +193,13 @@ func IsURLAvailable(address string) bool {
 // with the client.RPC interface.
 // It sets a timeout of 10s on CallContext & 20s on BatchCallContext made through it.
 type BaseRPCClient struct {
-	c *rpc.Client
+	c                *rpc.Client
+	batchCallTimeout time.Duration
+	callTimeout      time.Duration
 }
 
 func NewBaseRPCClient(c *rpc.Client) *BaseRPCClient {
-	return &BaseRPCClient{c: c}
+	return &BaseRPCClient{c: c, callTimeout: 10 * time.Second, batchCallTimeout: 20 * time.Second}
 }
 
 func (b *BaseRPCClient) Close() {
@@ -164,13 +207,13 @@ func (b *BaseRPCClient) Close() {
 }
 
 func (b *BaseRPCClient) CallContext(ctx context.Context, result any, method string, args ...any) error {
-	cCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	cCtx, cancel := context.WithTimeout(ctx, b.callTimeout)
 	defer cancel()
 	return b.c.CallContext(cCtx, result, method, args...)
 }
 
 func (b *BaseRPCClient) BatchCallContext(ctx context.Context, batch []rpc.BatchElem) error {
-	cCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	cCtx, cancel := context.WithTimeout(ctx, b.batchCallTimeout)
 	defer cancel()
 	return b.c.BatchCallContext(cCtx, batch)
 }
@@ -183,11 +226,11 @@ func (b *BaseRPCClient) EthSubscribe(ctx context.Context, channel any, args ...a
 // Prometheus metrics for each call.
 type InstrumentedRPCClient struct {
 	c RPC
-	m *metrics.Metrics
+	m *metrics.RPCClientMetrics
 }
 
 // NewInstrumentedRPC creates a new instrumented RPC client.
-func NewInstrumentedRPC(c RPC, m *metrics.Metrics) *InstrumentedRPCClient {
+func NewInstrumentedRPC(c RPC, m *metrics.RPCClientMetrics) *InstrumentedRPCClient {
 	return &InstrumentedRPCClient{
 		c: c,
 		m: m,
@@ -219,7 +262,7 @@ func (ic *InstrumentedRPCClient) EthSubscribe(ctx context.Context, channel any, 
 // the batch as a whole using a special <batch> method. Errors are tracked
 // for each individual batch response, unless the overall request fails in
 // which case the <batch> method is used.
-func instrumentBatch(m *metrics.Metrics, cb func() error, b []rpc.BatchElem) error {
+func instrumentBatch(m *metrics.RPCClientMetrics, cb func() error, b []rpc.BatchElem) error {
 	m.RPCClientRequestsTotal.WithLabelValues(metrics.BatchMethod).Inc()
 	for _, elem := range b {
 		m.RPCClientRequestsTotal.WithLabelValues(elem.Method).Inc()

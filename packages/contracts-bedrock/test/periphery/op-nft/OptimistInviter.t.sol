@@ -6,7 +6,6 @@ import { Test } from "forge-std/Test.sol";
 import { AttestationStation } from "src/periphery/op-nft/AttestationStation.sol";
 import { OptimistInviter } from "src/periphery/op-nft/OptimistInviter.sol";
 import { Optimist } from "src/periphery/op-nft/Optimist.sol";
-import { Strings } from "@openzeppelin/contracts/utils/Strings.sol";
 import { TestERC1271Wallet } from "test/mocks/TestERC1271Wallet.sol";
 import { OptimistInviterHelper } from "test/mocks/OptimistInviterHelper.sol";
 import { OptimistConstants } from "src/periphery/op-nft/libraries/OptimistConstants.sol";
@@ -139,7 +138,7 @@ contract OptimistInviter_Initializer is Test {
                 optimistInviterHelper.getDigestWithEIP712Domain(
                     claimableInvite, _eip712Name, _eip712Version, _eip712Chainid, _eip712VerifyingContract
                 )
-                )
+            )
         );
     }
 
@@ -222,7 +221,7 @@ contract OptimistInviter_Initializer is Test {
 }
 
 contract OptimistInviterTest is OptimistInviter_Initializer {
-    function test_initialize_succeeds() external {
+    function test_initialize_succeeds() external view {
         // expect attestationStation to be set
         assertEq(address(optimistInviter.ATTESTATION_STATION()), address(attestationStation));
         assertEq(optimistInviter.INVITE_GRANTER(), alice_inviteGranter);

@@ -20,34 +20,6 @@ import (
 	"github.com/ethereum-optimism/optimism/op-service/clock"
 )
 
-func TestMonitorMinGameTimestamp(t *testing.T) {
-	t.Parallel()
-
-	t.Run("zero game window returns zero", func(t *testing.T) {
-		monitor, _, _, _, _, _ := setupMonitorTest(t, []common.Address{})
-		monitor.gameWindow = time.Duration(0)
-		require.Equal(t, monitor.minGameTimestamp(), uint64(0))
-	})
-
-	t.Run("non-zero game window with zero clock", func(t *testing.T) {
-		monitor, _, _, _, _, _ := setupMonitorTest(t, []common.Address{})
-		monitor.gameWindow = time.Minute
-		monitor.clock = clock.NewSimpleClock()
-		monitor.clock.SetTime(0)
-		require.Equal(t, uint64(0), monitor.minGameTimestamp())
-	})
-
-	t.Run("minimum computed correctly", func(t *testing.T) {
-		monitor, _, _, _, _, _ := setupMonitorTest(t, []common.Address{})
-		monitor.gameWindow = time.Minute
-		monitor.clock = clock.NewSimpleClock()
-		frozen := uint64(time.Hour.Seconds())
-		monitor.clock.SetTime(frozen)
-		expected := uint64(time.Unix(int64(frozen), 0).Add(-time.Minute).Unix())
-		require.Equal(t, monitor.minGameTimestamp(), expected)
-	})
-}
-
 // TestMonitorGames tests that the monitor can handle a new head event
 // and resubscribe to new heads if the subscription errors.
 func TestMonitorGames(t *testing.T) {
@@ -77,7 +49,7 @@ func TestMonitorGames(t *testing.T) {
 					}:
 						headerNotSent = false
 					case <-ctx.Done():
-						break
+						return
 					default:
 					}
 				}
@@ -125,13 +97,12 @@ func TestMonitorGames(t *testing.T) {
 					Number: big.NewInt(1),
 				}:
 				case <-ctx.Done():
-					break
+					return
 				default:
 				}
 				// Just to avoid a tight loop
 				time.Sleep(100 * time.Millisecond)
 			}
-			require.NoError(t, waitErr)
 			mockHeadSource.SetErr(fmt.Errorf("eth subscribe test error"))
 			cancel()
 		}()
@@ -184,11 +155,6 @@ func setupMonitorTest(
 ) (*gameMonitor, *stubGameSource, *stubScheduler, *mockNewHeadSource, *stubPreimageScheduler, *mockScheduler) {
 	logger := testlog.Logger(t, log.LevelDebug)
 	source := &stubGameSource{}
-	i := uint64(1)
-	fetchBlockNum := func(ctx context.Context) (uint64, error) {
-		i++
-		return i, nil
-	}
 	sched := &stubScheduler{}
 	preimages := &stubPreimageScheduler{}
 	mockHeadSource := &mockNewHeadSource{}
@@ -201,7 +167,6 @@ func setupMonitorTest(
 		preimages,
 		time.Duration(0),
 		stubClaimer,
-		fetchBlockNum,
 		allowedGames,
 		mockHeadSource,
 	)

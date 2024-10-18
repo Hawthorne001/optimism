@@ -20,10 +20,19 @@ import (
 
 type ErrorCode int
 
+func (c ErrorCode) IsEngineError() bool {
+	return -38100 < c && c <= -38000
+}
+
+// Engine error codes used to be -3200x, but were rebased to -3800x:
+// https://github.com/ethereum/execution-apis/pull/214
 const (
-	UnknownPayload           ErrorCode = -32001 // Payload does not exist / is not available.
+	InvalidParams            ErrorCode = -32602
+	UnknownPayload           ErrorCode = -38001 // Payload does not exist / is not available.
 	InvalidForkchoiceState   ErrorCode = -38002 // Forkchoice state is invalid / inconsistent.
 	InvalidPayloadAttributes ErrorCode = -38003 // Payload attributes are invalid / inconsistent.
+	TooLargeEngineRequest    ErrorCode = -38004 // Unused, here for completeness, only used by engine_getPayloadBodiesByHashV1
+	UnsupportedFork          ErrorCode = -38005 // Unused, see issue #11130.
 )
 
 var ErrBedrockScalarPaddingNotEmpty = errors.New("version 0 scalar value has non-empty padding")
@@ -249,7 +258,7 @@ func (envelope *ExecutionPayloadEnvelope) CheckBlockHash() (actual common.Hash, 
 	return blockHash, blockHash == payload.BlockHash
 }
 
-func BlockAsPayload(bl *types.Block, canyonForkTime *uint64) (*ExecutionPayload, error) {
+func BlockAsPayload(bl *types.Block, shanghaiTime *uint64) (*ExecutionPayload, error) {
 	baseFee, overflow := uint256.FromBig(bl.BaseFee())
 	if overflow {
 		return nil, fmt.Errorf("invalid base fee in block: %s", bl.BaseFee())
@@ -282,15 +291,15 @@ func BlockAsPayload(bl *types.Block, canyonForkTime *uint64) (*ExecutionPayload,
 		BlobGasUsed:   (*Uint64Quantity)(bl.BlobGasUsed()),
 	}
 
-	if canyonForkTime != nil && uint64(payload.Timestamp) >= *canyonForkTime {
+	if shanghaiTime != nil && uint64(payload.Timestamp) >= *shanghaiTime {
 		payload.Withdrawals = &types.Withdrawals{}
 	}
 
 	return payload, nil
 }
 
-func BlockAsPayloadEnv(bl *types.Block, canyonForkTime *uint64) (*ExecutionPayloadEnvelope, error) {
-	payload, err := BlockAsPayload(bl, canyonForkTime)
+func BlockAsPayloadEnv(bl *types.Block, shanghaiTime *uint64) (*ExecutionPayloadEnvelope, error) {
+	payload, err := BlockAsPayload(bl, shanghaiTime)
 	if err != nil {
 		return nil, err
 	}
@@ -393,25 +402,48 @@ const (
 	L1ScalarEcotone = byte(1)
 )
 
-func (sysCfg *SystemConfig) EcotoneScalars() (blobBaseFeeScalar, baseFeeScalar uint32, err error) {
+type EcotoneScalars struct {
+	BlobBaseFeeScalar uint32
+	BaseFeeScalar     uint32
+}
+
+func (sysCfg *SystemConfig) EcotoneScalars() (EcotoneScalars, error) {
 	if err := CheckEcotoneL1SystemConfigScalar(sysCfg.Scalar); err != nil {
 		if errors.Is(err, ErrBedrockScalarPaddingNotEmpty) {
 			// L2 spec mandates we set baseFeeScalar to MaxUint32 if there are non-zero bytes in
 			// the padding area.
-			return 0, math.MaxUint32, nil
+			return EcotoneScalars{BlobBaseFeeScalar: 0, BaseFeeScalar: math.MaxUint32}, nil
 		}
-		return 0, 0, err
+		return EcotoneScalars{}, err
 	}
-	switch sysCfg.Scalar[0] {
+	return DecodeScalar(sysCfg.Scalar)
+}
+
+// DecodeScalar decodes the blobBaseFeeScalar and baseFeeScalar from a 32-byte scalar value.
+// It uses the first byte to determine the scalar format.
+func DecodeScalar(scalar [32]byte) (EcotoneScalars, error) {
+	switch scalar[0] {
 	case L1ScalarBedrock:
-		blobBaseFeeScalar = 0
-		baseFeeScalar = binary.BigEndian.Uint32(sysCfg.Scalar[28:32])
+		return EcotoneScalars{
+			BlobBaseFeeScalar: 0,
+			BaseFeeScalar:     binary.BigEndian.Uint32(scalar[28:32]),
+		}, nil
 	case L1ScalarEcotone:
-		blobBaseFeeScalar = binary.BigEndian.Uint32(sysCfg.Scalar[24:28])
-		baseFeeScalar = binary.BigEndian.Uint32(sysCfg.Scalar[28:32])
+		return EcotoneScalars{
+			BlobBaseFeeScalar: binary.BigEndian.Uint32(scalar[24:28]),
+			BaseFeeScalar:     binary.BigEndian.Uint32(scalar[28:32]),
+		}, nil
 	default:
-		err = fmt.Errorf("unexpected system config scalar: %s", sysCfg.Scalar)
+		return EcotoneScalars{}, fmt.Errorf("unexpected system config scalar: %x", scalar)
 	}
+}
+
+// EncodeScalar encodes the EcotoneScalars into a 32-byte scalar value
+// for the Ecotone serialization format.
+func EncodeScalar(scalars EcotoneScalars) (scalar [32]byte) {
+	scalar[0] = L1ScalarEcotone
+	binary.BigEndian.PutUint32(scalar[24:28], scalars.BlobBaseFeeScalar)
+	binary.BigEndian.PutUint32(scalar[28:32], scalars.BaseFeeScalar)
 	return
 }
 

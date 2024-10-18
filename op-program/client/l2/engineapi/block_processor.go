@@ -39,24 +39,17 @@ type BlockProcessor struct {
 	dataProvider BlockDataProvider
 }
 
-func NewBlockProcessorFromPayloadAttributes(provider BlockDataProvider, parent common.Hash, params *eth.PayloadAttributes) (*BlockProcessor, error) {
+func NewBlockProcessorFromPayloadAttributes(provider BlockDataProvider, parent common.Hash, attrs *eth.PayloadAttributes) (*BlockProcessor, error) {
 	header := &types.Header{
 		ParentHash:       parent,
-		Coinbase:         params.SuggestedFeeRecipient,
+		Coinbase:         attrs.SuggestedFeeRecipient,
 		Difficulty:       common.Big0,
-		GasLimit:         uint64(*params.GasLimit),
-		Time:             uint64(params.Timestamp),
+		GasLimit:         uint64(*attrs.GasLimit),
+		Time:             uint64(attrs.Timestamp),
 		Extra:            nil,
-		MixDigest:        common.Hash(params.PrevRandao),
+		MixDigest:        common.Hash(attrs.PrevRandao),
 		Nonce:            types.EncodeNonce(0),
-		ParentBeaconRoot: params.ParentBeaconBlockRoot,
-	}
-
-	// Ecotone
-	if params.ParentBeaconBlockRoot != nil {
-		zero := uint64(0)
-		header.BlobGasUsed = &zero
-		header.ExcessBlobGas = &zero
+		ParentBeaconRoot: attrs.ParentBeaconBlockRoot,
 	}
 
 	return NewBlockProcessorFromHeader(provider, header)
@@ -80,17 +73,31 @@ func NewBlockProcessorFromHeader(provider BlockDataProvider, h *types.Header) (*
 	header.BaseFee = eip1559.CalcBaseFee(provider.Config(), parentHeader, header.Time)
 	header.GasUsed = 0
 	gasPool := new(core.GasPool).AddGas(header.GasLimit)
-	if h.ParentBeaconRoot != nil {
+	mkEVM := func() *vm.EVM {
 		// Unfortunately this is not part of any Geth environment setup,
 		// we just have to apply it, like how the Geth block-builder worker does.
 		context := core.NewEVMBlockContext(header, provider, nil, provider.Config(), statedb)
 		// NOTE: Unlikely to be needed for the beacon block root, but we setup any precompile overrides anyways for forwards-compatibility
 		var precompileOverrides vm.PrecompileOverrides
-		if vmConfig := provider.GetVMConfig(); vmConfig != nil && vmConfig.OptimismPrecompileOverrides != nil {
-			precompileOverrides = vmConfig.OptimismPrecompileOverrides
+		if vmConfig := provider.GetVMConfig(); vmConfig != nil && vmConfig.PrecompileOverrides != nil {
+			precompileOverrides = vmConfig.PrecompileOverrides
 		}
-		vmenv := vm.NewEVM(context, vm.TxContext{}, statedb, provider.Config(), vm.Config{OptimismPrecompileOverrides: precompileOverrides})
+		vmenv := vm.NewEVM(context, vm.TxContext{}, statedb, provider.Config(), vm.Config{PrecompileOverrides: precompileOverrides})
+		return vmenv
+	}
+	if h.ParentBeaconRoot != nil {
+		if provider.Config().IsCancun(header.Number, header.Time) {
+			// Blob tx not supported on optimism chains but fields must be set when Cancun is active.
+			zero := uint64(0)
+			header.BlobGasUsed = &zero
+			header.ExcessBlobGas = &zero
+		}
+		vmenv := mkEVM()
 		core.ProcessBeaconBlockRoot(*header.ParentBeaconRoot, vmenv, statedb)
+	}
+	if provider.Config().IsPrague(header.Number, header.Time) {
+		vmenv := mkEVM()
+		core.ProcessParentBlockHash(header.ParentHash, vmenv, statedb)
 	}
 	return &BlockProcessor{
 		header:       header,
@@ -124,7 +131,11 @@ func (b *BlockProcessor) AddTx(tx *types.Transaction) error {
 }
 
 func (b *BlockProcessor) Assemble() (*types.Block, error) {
-	return b.dataProvider.Engine().FinalizeAndAssemble(b.dataProvider, b.header, b.state, b.transactions, nil, b.receipts, nil)
+	body := types.Body{
+		Transactions: b.transactions,
+	}
+
+	return b.dataProvider.Engine().FinalizeAndAssemble(b.dataProvider, b.header, b.state, &body, b.receipts)
 }
 
 func (b *BlockProcessor) Commit() error {

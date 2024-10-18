@@ -1,13 +1,19 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
+// Testing
 import { Test } from "forge-std/Test.sol";
+import { SimpleStorage } from "test/universal/Proxy.t.sol";
+
+// Contracts
 import { Proxy } from "src/universal/Proxy.sol";
 import { ProxyAdmin } from "src/universal/ProxyAdmin.sol";
-import { SimpleStorage } from "test/universal/Proxy.t.sol";
+import { AddressManager } from "src/legacy/AddressManager.sol";
 import { L1ChugSplashProxy } from "src/legacy/L1ChugSplashProxy.sol";
 import { ResolvedDelegateProxy } from "src/legacy/ResolvedDelegateProxy.sol";
-import { AddressManager } from "src/legacy/AddressManager.sol";
+
+// Interfaces
+import { IAddressManager } from "src/legacy/interfaces/IAddressManager.sol";
 
 contract ProxyAdmin_Test is Test {
     address alice = address(64);
@@ -45,7 +51,7 @@ contract ProxyAdmin_Test is Test {
         // Set the address of the address manager in the admin so that it
         // can resolve the implementation address of legacy
         // ResolvedDelegateProxy based proxies.
-        admin.setAddressManager(addressManager);
+        admin.setAddressManager(IAddressManager(address(addressManager)));
         // Set the reverse lookup of the ResolvedDelegateProxy
         // proxy
         admin.setImplementationName(address(resolved), "a");
@@ -67,7 +73,7 @@ contract ProxyAdmin_Test is Test {
 
     function test_setAddressManager_notOwner_reverts() external {
         vm.expectRevert("Ownable: caller is not the owner");
-        admin.setAddressManager(AddressManager((address(0))));
+        admin.setAddressManager(IAddressManager((address(0))));
     }
 
     function test_setImplementationName_notOwner_reverts() external {
@@ -80,11 +86,11 @@ contract ProxyAdmin_Test is Test {
         admin.setProxyType(address(0), ProxyAdmin.ProxyType.CHUGSPLASH);
     }
 
-    function test_owner_succeeds() external {
+    function test_owner_succeeds() external view {
         assertEq(admin.owner(), alice);
     }
 
-    function test_proxyType_succeeds() external {
+    function test_proxyType_succeeds() external view {
         assertEq(uint256(admin.proxyType(address(proxy))), uint256(ProxyAdmin.ProxyType.ERC1967));
         assertEq(uint256(admin.proxyType(address(chugsplash))), uint256(ProxyAdmin.ProxyType.CHUGSPLASH));
         assertEq(uint256(admin.proxyType(address(resolved))), uint256(ProxyAdmin.ProxyType.RESOLVED));
@@ -117,19 +123,19 @@ contract ProxyAdmin_Test is Test {
         }
     }
 
-    function test_erc1967GetProxyAdmin_succeeds() external {
+    function test_erc1967GetProxyAdmin_succeeds() external view {
         getProxyAdmin(payable(proxy));
     }
 
-    function test_chugsplashGetProxyAdmin_succeeds() external {
+    function test_chugsplashGetProxyAdmin_succeeds() external view {
         getProxyAdmin(payable(chugsplash));
     }
 
-    function test_delegateResolvedGetProxyAdmin_succeeds() external {
+    function test_delegateResolvedGetProxyAdmin_succeeds() external view {
         getProxyAdmin(payable(resolved));
     }
 
-    function getProxyAdmin(address payable _proxy) internal {
+    function getProxyAdmin(address payable _proxy) internal view {
         address owner = admin.getProxyAdmin(_proxy);
         assertEq(owner, address(admin));
     }

@@ -9,18 +9,18 @@ import { EIP1967Helper } from "test/mocks/EIP1967Helper.sol";
 
 // Libraries
 import { Types } from "src/libraries/Types.sol";
-import { Constants } from "src/libraries/Constants.sol";
 
 // Target contract dependencies
 import { Proxy } from "src/universal/Proxy.sol";
 
 // Target contract
 import { L2OutputOracle } from "src/L1/L2OutputOracle.sol";
+import { IL2OutputOracle } from "src/L1/interfaces/IL2OutputOracle.sol";
 
 contract L2OutputOracle_constructor_Test is CommonTest {
     /// @dev Tests that constructor sets the initial values correctly.
     function test_constructor_succeeds() external {
-        L2OutputOracle oracleImpl = new L2OutputOracle();
+        IL2OutputOracle oracleImpl = IL2OutputOracle(address(new L2OutputOracle()));
 
         assertEq(oracleImpl.SUBMISSION_INTERVAL(), 1);
         assertEq(oracleImpl.submissionInterval(), 1);
@@ -168,7 +168,7 @@ contract L2OutputOracle_getter_Test is CommonTest {
     }
 
     /// @dev Tests that `nextBlockNumber` returns the correct value.
-    function test_nextBlockNumber_succeeds() external {
+    function test_nextBlockNumber_succeeds() external view {
         assertEq(
             l2OutputOracle.nextBlockNumber(),
             // The return value should match this arithmetic

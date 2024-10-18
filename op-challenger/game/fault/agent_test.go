@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"math/big"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum-optimism/optimism/op-challenger/game/fault/trace"
+	"github.com/ethereum-optimism/optimism/op-service/clock"
 	"github.com/ethereum-optimism/optimism/op-service/sources/batching/rpcblock"
 	"github.com/stretchr/testify/require"
 
@@ -20,6 +24,8 @@ import (
 	"github.com/ethereum-optimism/optimism/op-challenger/metrics"
 	"github.com/ethereum-optimism/optimism/op-service/testlog"
 )
+
+var l1Time = time.UnixMilli(100)
 
 func TestDoNotMakeMovesWhenGameIsResolvable(t *testing.T) {
 	ctx := context.Background()
@@ -52,6 +58,18 @@ func TestDoNotMakeMovesWhenGameIsResolvable(t *testing.T) {
 			require.EqualValues(t, 1, responder.resolveCount, "should resolve winning game")
 		})
 	}
+}
+
+func TestDoNotMakeMovesWhenL2BlockNumberChallenged(t *testing.T) {
+	ctx := context.Background()
+
+	agent, claimLoader, responder := setupTestAgent(t)
+	claimLoader.blockNumChallenged = true
+
+	require.NoError(t, agent.Act(ctx))
+
+	require.Equal(t, 1, responder.callResolveCount, "should check if game is resolvable")
+	require.Equal(t, 1, claimLoader.callCount, "should fetch claims only once for resolveClaim")
 }
 
 func createClaimsWithClaimants(t *testing.T, d types.Depth) []types.Claim {
@@ -110,22 +128,51 @@ func TestAgent_SelectiveClaimResolution(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
+	for _, tCase := range tests {
+		tCase := tCase
+		t.Run(tCase.name, func(t *testing.T) {
 			agent, claimLoader, responder := setupTestAgent(t)
-			agent.selective = test.selective
-			agent.claimants = test.claimants
+			agent.selective = tCase.selective
+			agent.claimants = tCase.claimants
 			claimLoader.maxLoads = 1
-			claimLoader.claims = test.claims
-			responder.callResolveStatus = test.callResolveStatus
+			if tCase.selective {
+				claimLoader.maxLoads = 0
+			}
+			claimLoader.claims = tCase.claims
+			responder.callResolveStatus = tCase.callResolveStatus
 
 			require.NoError(t, agent.Act(ctx))
 
-			require.Equal(t, test.expectedResolveCount, responder.callResolveClaimCount, "should check if game is resolvable")
-			require.Equal(t, test.expectedResolveCount, responder.resolveClaimCount, "should check if game is resolvable")
+			require.Equal(t, tCase.expectedResolveCount, responder.callResolveClaimCount, "should check if game is resolvable")
+			require.Equal(t, tCase.expectedResolveCount, responder.resolveClaimCount, "should check if game is resolvable")
+			if tCase.selective {
+				require.Equal(t, 0, responder.callResolveCount, "should not resolve game in selective mode")
+				require.Equal(t, 0, responder.resolveCount, "should not resolve game in selective mode")
+			}
 		})
 	}
+}
+
+func TestSkipAttemptingToResolveClaimsWhenClockNotExpired(t *testing.T) {
+	agent, claimLoader, responder := setupTestAgent(t)
+	responder.callResolveErr = errors.New("game is not resolvable")
+	responder.callResolveClaimErr = errors.New("claim is not resolvable")
+	depth := types.Depth(4)
+	claimBuilder := test.NewClaimBuilder(t, depth, alphabet.NewTraceProvider(big.NewInt(0), depth))
+
+	rootTime := l1Time.Add(-agent.maxClockDuration - 5*time.Minute)
+	gameBuilder := claimBuilder.GameBuilder(test.WithClock(rootTime, 0))
+	gameBuilder.Seq().
+		Attack(test.WithClock(rootTime.Add(5*time.Minute), 5*time.Minute)).
+		Defend(test.WithClock(rootTime.Add(7*time.Minute), 2*time.Minute)).
+		Attack(test.WithClock(rootTime.Add(11*time.Minute), 4*time.Minute))
+	claimLoader.claims = gameBuilder.Game.Claims()
+
+	require.NoError(t, agent.Act(context.Background()))
+
+	// Currently tries to resolve the first two claims because their clock's have expired, but doesn't detect that
+	// they have unresolvable children.
+	require.Equal(t, 2, responder.callResolveClaimCount)
 }
 
 func TestLoadClaimsWhenGameNotResolvable(t *testing.T) {
@@ -151,16 +198,24 @@ func setupTestAgent(t *testing.T) (*Agent, *stubClaimLoader, *stubResponder) {
 	logger := testlog.Logger(t, log.LevelInfo)
 	claimLoader := &stubClaimLoader{}
 	depth := types.Depth(4)
+	gameDuration := 3 * time.Minute
 	provider := alphabet.NewTraceProvider(big.NewInt(0), depth)
 	responder := &stubResponder{}
-	agent := NewAgent(metrics.NoopMetrics, claimLoader, depth, trace.NewSimpleTraceAccessor(provider), responder, logger, false, []common.Address{})
+	systemClock := clock.NewDeterministicClock(time.UnixMilli(120200))
+	l1Clock := clock.NewDeterministicClock(l1Time)
+	agent := NewAgent(metrics.NoopMetrics, systemClock, l1Clock, claimLoader, depth, gameDuration, trace.NewSimpleTraceAccessor(provider), responder, logger, false, []common.Address{})
 	return agent, claimLoader, responder
 }
 
 type stubClaimLoader struct {
-	callCount int
-	maxLoads  int
-	claims    []types.Claim
+	callCount          int
+	maxLoads           int
+	claims             []types.Claim
+	blockNumChallenged bool
+}
+
+func (s *stubClaimLoader) IsL2BlockNumberChallenged(_ context.Context, _ rpcblock.Block) (bool, error) {
+	return s.blockNumChallenged, nil
 }
 
 func (s *stubClaimLoader) GetAllClaims(_ context.Context, _ rpcblock.Block) ([]types.Claim, error) {
@@ -172,6 +227,7 @@ func (s *stubClaimLoader) GetAllClaims(_ context.Context, _ rpcblock.Block) ([]t
 }
 
 type stubResponder struct {
+	l                 sync.Mutex
 	callResolveCount  int
 	callResolveStatus gameTypes.GameStatus
 	callResolveErr    error
@@ -182,28 +238,41 @@ type stubResponder struct {
 	callResolveClaimCount int
 	callResolveClaimErr   error
 	resolveClaimCount     int
+	resolvedClaims        []uint64
 }
 
-func (s *stubResponder) CallResolve(ctx context.Context) (gameTypes.GameStatus, error) {
+func (s *stubResponder) CallResolve(_ context.Context) (gameTypes.GameStatus, error) {
+	s.l.Lock()
+	defer s.l.Unlock()
 	s.callResolveCount++
 	return s.callResolveStatus, s.callResolveErr
 }
 
 func (s *stubResponder) Resolve() error {
+	s.l.Lock()
+	defer s.l.Unlock()
 	s.resolveCount++
 	return s.resolveErr
 }
 
-func (s *stubResponder) CallResolveClaim(ctx context.Context, clainIdx uint64) error {
+func (s *stubResponder) CallResolveClaim(_ context.Context, idx uint64) error {
+	s.l.Lock()
+	defer s.l.Unlock()
+	if slices.Contains(s.resolvedClaims, idx) {
+		return errors.New("already resolved")
+	}
 	s.callResolveClaimCount++
 	return s.callResolveClaimErr
 }
 
-func (s *stubResponder) ResolveClaim(clainIdx uint64) error {
-	s.resolveClaimCount++
+func (s *stubResponder) ResolveClaims(claims ...uint64) error {
+	s.l.Lock()
+	defer s.l.Unlock()
+	s.resolveClaimCount += len(claims)
+	s.resolvedClaims = append(s.resolvedClaims, claims...)
 	return nil
 }
 
-func (s *stubResponder) PerformAction(ctx context.Context, response types.Action) error {
+func (s *stubResponder) PerformAction(_ context.Context, _ types.Action) error {
 	return nil
 }

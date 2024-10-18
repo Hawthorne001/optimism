@@ -3,15 +3,16 @@ pragma solidity 0.8.15;
 
 import { Test } from "forge-std/Test.sol";
 import { SystemConfig } from "src/L1/SystemConfig.sol";
+import { ISystemConfig } from "src/L1/interfaces/ISystemConfig.sol";
 import { Proxy } from "src/universal/Proxy.sol";
 import { Constants } from "src/libraries/Constants.sol";
 
-contract SystemConfig_GasLimitLowerBound_Invariant is Test {
-    SystemConfig public config;
+contract SystemConfig_GasLimitBoundaries_Invariant is Test {
+    ISystemConfig public config;
 
     function setUp() external {
         Proxy proxy = new Proxy(msg.sender);
-        SystemConfig configImpl = new SystemConfig();
+        ISystemConfig configImpl = ISystemConfig(address(new SystemConfig()));
 
         vm.prank(msg.sender);
         proxy.upgradeToAndCall(
@@ -27,19 +28,20 @@ contract SystemConfig_GasLimitLowerBound_Invariant is Test {
                     address(1), // unsafe block signer
                     Constants.DEFAULT_RESOURCE_CONFIG(),
                     address(0), // _batchInbox
-                    SystemConfig.Addresses({ // _addrs
+                    ISystemConfig.Addresses({ // _addrs
                         l1CrossDomainMessenger: address(0),
                         l1ERC721Bridge: address(0),
                         l1StandardBridge: address(0),
-                        l2OutputOracle: address(0),
+                        disputeGameFactory: address(0),
                         optimismPortal: address(0),
-                        optimismMintableERC20Factory: address(0)
+                        optimismMintableERC20Factory: address(0),
+                        gasPayingToken: Constants.ETHER
                     })
                 )
             )
         );
 
-        config = SystemConfig(address(proxy));
+        config = ISystemConfig(address(proxy));
 
         // Set the target contract to the `config`
         targetContract(address(config));
@@ -62,9 +64,13 @@ contract SystemConfig_GasLimitLowerBound_Invariant is Test {
         targetInterface(target);
     }
 
-    /// @custom:invariant The gas limit of the `SystemConfig` contract can never be lower
-    ///                   than the hard-coded lower bound.
-    function invariant_gasLimitLowerBound() external {
+    /// @custom:invariant Gas limit boundaries
+    ///
+    /// The gas limit of the `SystemConfig` contract can never be lower than the hard-coded lower bound or higher than
+    /// the hard-coded upper bound. The lower bound must never be higher than the upper bound.
+    function invariant_gasLimitBoundaries() external view {
         assertTrue(config.gasLimit() >= config.minimumGasLimit());
+        assertTrue(config.gasLimit() <= config.maximumGasLimit());
+        assertTrue(config.minimumGasLimit() <= config.maximumGasLimit());
     }
 }

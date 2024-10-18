@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +16,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/exp/slices"
 )
 
 type queueFunc func(id int, candidate TxCandidate, receiptCh chan TxReceipt[int], q *Queue[int]) bool
@@ -167,8 +168,8 @@ func TestQueue_Send(t *testing.T) {
 			t.Parallel()
 
 			conf := configWithNumConfs(1)
-			conf.ReceiptQueryInterval = 1 * time.Second // simulate a network send
-			conf.ResubmissionTimeout = 2 * time.Second  // resubmit to detect errors
+			conf.ReceiptQueryInterval = 1 * time.Second            // simulate a network send
+			conf.ResubmissionTimeout.Store(int64(2 * time.Second)) // resubmit to detect errors
 			conf.SafeAbortNonceTooLowCount = 1
 			backend := newMockBackendWithNonce(newGasPricer(3))
 			mgr := &SimpleTxManager{
@@ -181,10 +182,15 @@ func TestQueue_Send(t *testing.T) {
 			}
 
 			// track the nonces, and return any expected errors from tx sending
-			var nonces []uint64
+			var (
+				nonces  []uint64
+				nonceMu sync.Mutex
+			)
 			sendTx := func(ctx context.Context, tx *types.Transaction) error {
 				index := int(tx.Data()[0])
+				nonceMu.Lock()
 				nonces = append(nonces, tx.Nonce())
+				nonceMu.Unlock()
 				var testTx *testTx
 				if index < len(test.txs) {
 					testTx = &test.txs[index]
@@ -216,7 +222,7 @@ func TestQueue_Send(t *testing.T) {
 				require.Equal(t, c.queued, queued, msg)
 			}
 			// wait for the queue to drain (all txs complete or failed)
-			queue.Wait()
+			_ = queue.Wait()
 			duration := time.Since(start)
 			// expect the execution time within a certain window
 			now := time.Now()

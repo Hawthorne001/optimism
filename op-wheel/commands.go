@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -59,12 +60,16 @@ var (
 		Value:    "http://localhost:8551/",
 		EnvVars:  prefixEnvVars("ENGINE"),
 	}
+	EngineJWT = &cli.StringFlag{
+		Name:    "engine.jwt-secret",
+		Usage:   "JWT secret used to authenticate Engine API communication with. Takes precedence over engine.jwt-secret-path.",
+		EnvVars: prefixEnvVars("ENGINE_JWT_SECRET"),
+	}
 	EngineJWTPath = &cli.StringFlag{
-		Name:      "engine.jwt-secret",
+		Name:      "engine.jwt-secret-path",
 		Usage:     "Path to JWT secret file used to authenticate Engine API communication with.",
-		Required:  true,
 		TakesFile: true,
-		EnvVars:   prefixEnvVars("ENGINE_JWT_SECRET"),
+		EnvVars:   prefixEnvVars("ENGINE_JWT_SECRET_PATH"),
 	}
 	EngineOpenEndpoint = &cli.StringFlag{
 		Name:    "engine.open",
@@ -116,7 +121,7 @@ var (
 
 func withEngineFlags(flags ...cli.Flag) []cli.Flag {
 	return append(append(flags,
-		EngineEndpoint, EngineJWTPath, EngineOpenEndpoint, EngineVersion),
+		EngineEndpoint, EngineJWT, EngineJWTPath, EngineOpenEndpoint, EngineVersion),
 		oplog.CLIFlags(envVarPrefix)...)
 }
 
@@ -177,14 +182,35 @@ func initLogger(ctx *cli.Context) log.Logger {
 }
 
 func initEngineRPC(ctx *cli.Context, lgr log.Logger) (client.RPC, error) {
-	jwtData, err := os.ReadFile(ctx.String(EngineJWTPath.Name))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read jwt: %w", err)
+	jwtString := ctx.String(EngineJWT.Name) // no IsSet check; allow empty value to be overridden
+	if jwtString == "" {
+		if ctx.IsSet(EngineJWTPath.Name) {
+			jwtData, err := os.ReadFile(ctx.String(EngineJWTPath.Name))
+			if err != nil {
+				return nil, fmt.Errorf("failed to read jwt: %w", err)
+			}
+			jwtString = string(jwtData)
+		} else {
+			return nil, errors.New("neither JWT secret string nor path provided")
+		}
 	}
-	secret := common.HexToHash(strings.TrimSpace(string(jwtData)))
+	secret, err := parseJWTSecret(jwtString)
+	if err != nil {
+		return nil, err
+	}
 	endpoint := ctx.String(EngineEndpoint.Name)
 	return client.NewRPC(ctx.Context, lgr, endpoint,
 		client.WithGethRPCOptions(rpc.WithHTTPAuth(node.NewJWTAuth(secret))))
+}
+
+func parseJWTSecret(v string) (common.Hash, error) {
+	v = strings.TrimSpace(v)
+	v = "0x" + strings.TrimPrefix(v, "0x") // ensure prefix is there
+	var out common.Hash
+	if err := out.UnmarshalText([]byte(v)); err != nil {
+		return common.Hash{}, fmt.Errorf("failed to parse JWT secret: %w", err)
+	}
+	return out, nil
 }
 
 func initVersionProvider(ctx *cli.Context, lgr log.Logger) (sources.EngineVersionProvider, error) {
@@ -229,6 +255,7 @@ func rollupFromGethConfig(cfg *params.ChainConfig) *rollup.Config {
 		RegolithTime: cfg.RegolithTime,
 		CanyonTime:   cfg.CanyonTime,
 		EcotoneTime:  cfg.EcotoneTime,
+		GraniteTime:  cfg.GraniteTime,
 		InteropTime:  cfg.InteropTime,
 	}
 }
@@ -409,30 +436,6 @@ var (
 			return ch.RunAndClose(cheat.SetNonce(addrFlagValue("address", ctx), bigFlagValue("balance", ctx).Uint64()))
 		}),
 	}
-	CheatOvmOwnersCmd = &cli.Command{
-		Name: "ovm-owners",
-		Flags: []cli.Flag{
-			DataDirFlag,
-			&cli.StringFlag{
-				Name:     "config",
-				Usage:    "Path to JSON config of OVM address replacements to apply.",
-				Required: true,
-				EnvVars:  prefixEnvVars("OVM_OWNERS"),
-				Value:    "ovm-owners.json",
-			},
-		},
-		Action: CheatAction(false, func(ctx *cli.Context, ch *cheat.Cheater) error {
-			confData, err := os.ReadFile(ctx.String("config"))
-			if err != nil {
-				return fmt.Errorf("failed to read OVM owners JSON config file: %w", err)
-			}
-			var conf cheat.OvmOwnersConfig
-			if err := json.Unmarshal(confData, &conf); err != nil {
-				return err
-			}
-			return ch.RunAndClose(cheat.OvmOwners(&conf))
-		}),
-	}
 	CheatPrintHeadBlock = &cli.Command{
 		Name:  "head-block",
 		Usage: "dump head block as JSON",
@@ -501,7 +504,7 @@ var (
 
 			metricsCfg := opmetrics.ReadCLIConfig(ctx)
 
-			return opservice.CloseAction(func(ctx context.Context, shutdown <-chan struct{}) error {
+			return opservice.CloseAction(ctx.Context, func(ctx context.Context) error {
 				registry := opmetrics.NewRegistry()
 				metrics := engine.NewMetrics("wheel", registry)
 				if metricsCfg.Enabled {
@@ -516,7 +519,7 @@ var (
 						}
 					}()
 				}
-				return engine.Auto(ctx, metrics, client, l, shutdown, settings)
+				return engine.Auto(ctx, metrics, client, l, settings)
 			})
 		}),
 	}
@@ -702,7 +705,6 @@ var CheatCmd = &cli.Command{
 		CheatSetBalanceCmd,
 		CheatSetCodeCmd,
 		CheatSetNonceCmd,
-		CheatOvmOwnersCmd,
 		CheatPrintHeadBlock,
 		CheatPrintHeadHeader,
 	},

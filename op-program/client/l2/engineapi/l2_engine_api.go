@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/stateless"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/downloader"
@@ -37,12 +38,17 @@ type EngineBackend interface {
 
 	StateAt(root common.Hash) (*state.StateDB, error)
 
-	InsertBlockWithoutSetHead(block *types.Block) error
+	InsertBlockWithoutSetHead(block *types.Block, makeWitness bool) (*stateless.Witness, error)
 	SetCanonical(head *types.Block) (common.Hash, error)
 	SetFinalized(header *types.Header)
 	SetSafe(header *types.Header)
 
 	consensus.ChainHeaderReader
+}
+
+type CachingEngineBackend interface {
+	EngineBackend
+	AssembleAndInsertBlockWithoutSetHead(processor *BlockProcessor) (*types.Block, error)
 }
 
 // L2EngineAPI wraps an engine actor, and implements the RPC backend required to serve the engine API.
@@ -80,20 +86,20 @@ var (
 )
 
 // computePayloadId computes a pseudo-random payloadid, based on the parameters.
-func computePayloadId(headBlockHash common.Hash, params *eth.PayloadAttributes) engine.PayloadID {
+func computePayloadId(headBlockHash common.Hash, attrs *eth.PayloadAttributes) engine.PayloadID {
 	// Hash
 	hasher := sha256.New()
 	hasher.Write(headBlockHash[:])
-	_ = binary.Write(hasher, binary.BigEndian, params.Timestamp)
-	hasher.Write(params.PrevRandao[:])
-	hasher.Write(params.SuggestedFeeRecipient[:])
-	_ = binary.Write(hasher, binary.BigEndian, params.NoTxPool)
-	_ = binary.Write(hasher, binary.BigEndian, uint64(len(params.Transactions)))
-	for _, tx := range params.Transactions {
+	_ = binary.Write(hasher, binary.BigEndian, attrs.Timestamp)
+	hasher.Write(attrs.PrevRandao[:])
+	hasher.Write(attrs.SuggestedFeeRecipient[:])
+	_ = binary.Write(hasher, binary.BigEndian, attrs.NoTxPool)
+	_ = binary.Write(hasher, binary.BigEndian, uint64(len(attrs.Transactions)))
+	for _, tx := range attrs.Transactions {
 		_ = binary.Write(hasher, binary.BigEndian, uint64(len(tx))) // length-prefix to avoid collisions
 		hasher.Write(tx)
 	}
-	_ = binary.Write(hasher, binary.BigEndian, *params.GasLimit)
+	_ = binary.Write(hasher, binary.BigEndian, *attrs.GasLimit)
 	var out engine.PayloadID
 	copy(out[:], hasher.Sum(nil)[:8])
 	return out
@@ -140,22 +146,22 @@ func (ea *L2EngineAPI) IncludeTx(tx *types.Transaction, from common.Address) err
 	return nil
 }
 
-func (ea *L2EngineAPI) startBlock(parent common.Hash, params *eth.PayloadAttributes) error {
+func (ea *L2EngineAPI) startBlock(parent common.Hash, attrs *eth.PayloadAttributes) error {
 	if ea.blockProcessor != nil {
 		ea.log.Warn("started building new block without ending previous block", "previous", ea.blockProcessor.header, "prev_payload_id", ea.payloadID)
 	}
 
-	processor, err := NewBlockProcessorFromPayloadAttributes(ea.backend, parent, params)
+	processor, err := NewBlockProcessorFromPayloadAttributes(ea.backend, parent, attrs)
 	if err != nil {
 		return err
 	}
 	ea.blockProcessor = processor
 	ea.pendingIndices = make(map[common.Address]uint64)
-	ea.l2ForceEmpty = params.NoTxPool
-	ea.payloadID = computePayloadId(parent, params)
+	ea.l2ForceEmpty = attrs.NoTxPool
+	ea.payloadID = computePayloadId(parent, attrs)
 
 	// pre-process the deposits
-	for i, otx := range params.Transactions {
+	for i, otx := range attrs.Transactions {
 		var tx types.Transaction
 		if err := tx.UnmarshalBinary(otx); err != nil {
 			return fmt.Errorf("transaction %d is not valid: %w", i, err)
@@ -176,7 +182,18 @@ func (ea *L2EngineAPI) endBlock() (*types.Block, error) {
 	processor := ea.blockProcessor
 	ea.blockProcessor = nil
 
-	block, err := processor.Assemble()
+	var block *types.Block
+	var err error
+	// If the backend supports it, write the newly created block to the database without making it canonical.
+	// This avoids needing to reprocess the block if it is sent back via newPayload.
+	// The block is not made canonical so if it is never sent back via newPayload worst case it just wastes some storage
+	// In the context of the OP Stack derivation, the created block is always immediately imported so it makes sense to
+	// optimise.
+	if cachingBackend, ok := ea.backend.(CachingEngineBackend); ok {
+		block, err = cachingBackend.AssembleAndInsertBlockWithoutSetHead(processor)
+	} else {
+		block, err = processor.Assemble()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("assemble block: %w", err)
 	}
@@ -304,7 +321,7 @@ func (ea *L2EngineAPI) NewPayloadV3(ctx context.Context, params *eth.ExecutionPa
 	return ea.newPayload(ctx, params, versionedHashes, beaconRoot)
 }
 
-func (ea *L2EngineAPI) getPayload(ctx context.Context, payloadId eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
+func (ea *L2EngineAPI) getPayload(_ context.Context, payloadId eth.PayloadID) (*eth.ExecutionPayloadEnvelope, error) {
 	ea.log.Trace("L2Engine API request received", "method", "GetPayload", "id", payloadId)
 	if ea.payloadID != payloadId {
 		ea.log.Warn("unexpected payload ID requested for block building", "expected", ea.payloadID, "got", payloadId)
@@ -316,10 +333,10 @@ func (ea *L2EngineAPI) getPayload(ctx context.Context, payloadId eth.PayloadID) 
 		return nil, engine.UnknownPayload
 	}
 
-	return eth.BlockAsPayloadEnv(bl, ea.config().CanyonTime)
+	return eth.BlockAsPayloadEnv(bl, ea.config().ShanghaiTime)
 }
 
-func (ea *L2EngineAPI) forkchoiceUpdated(ctx context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
+func (ea *L2EngineAPI) forkchoiceUpdated(_ context.Context, state *eth.ForkchoiceState, attr *eth.PayloadAttributes) (*eth.ForkchoiceUpdatedResult, error) {
 	ea.log.Trace("L2Engine API request received", "method", "ForkchoiceUpdated", "head", state.HeadBlockHash, "finalized", state.FinalizedBlockHash, "safe", state.SafeBlockHash)
 	if state.HeadBlockHash == (common.Hash{}) {
 		ea.log.Warn("Forkchoice requested update to zero hash")
@@ -438,7 +455,7 @@ func toGethWithdrawals(payload *eth.ExecutionPayload) []*types.Withdrawal {
 	return result
 }
 
-func (ea *L2EngineAPI) newPayload(ctx context.Context, payload *eth.ExecutionPayload, hashes []common.Hash, root *common.Hash) (*eth.PayloadStatusV1, error) {
+func (ea *L2EngineAPI) newPayload(_ context.Context, payload *eth.ExecutionPayload, hashes []common.Hash, root *common.Hash) (*eth.PayloadStatusV1, error) {
 	ea.log.Trace("L2Engine API request received", "method", "ExecutePayload", "number", payload.BlockNumber, "hash", payload.BlockHash)
 	txs := make([][]byte, len(payload.Transactions))
 	for i, tx := range payload.Transactions {
@@ -470,17 +487,17 @@ func (ea *L2EngineAPI) newPayload(ctx context.Context, payload *eth.ExecutionPay
 	// If we already have the block locally, ignore the entire execution and just
 	// return a fake success.
 	if block := ea.backend.GetBlock(payload.BlockHash, uint64(payload.BlockNumber)); block != nil {
-		ea.log.Warn("Ignoring already known beacon payload", "number", payload.BlockNumber, "hash", payload.BlockHash, "age", common.PrettyAge(time.Unix(int64(block.Time()), 0)))
+		ea.log.Info("Using existing beacon payload", "number", payload.BlockNumber, "hash", payload.BlockHash, "age", common.PrettyAge(time.Unix(int64(block.Time()), 0)))
 		hash := block.Hash()
 		return &eth.PayloadStatusV1{Status: eth.ExecutionValid, LatestValidHash: &hash}, nil
 	}
 
-	// TODO: skipping invalid ancestor check (i.e. not remembering previously failed blocks)
+	// Skip invalid ancestor check (i.e. not remembering previously failed blocks)
 
 	parent := ea.backend.GetBlock(block.ParentHash(), block.NumberU64()-1)
 	if parent == nil {
 		ea.remotes[block.Hash()] = block
-		// TODO: hack, saying we accepted if we don't know the parent block. Might want to return critical error if we can't actually sync.
+		// Return accepted if we don't know the parent block. Note that there's no actual sync to activate.
 		return &eth.PayloadStatusV1{Status: eth.ExecutionAccepted, LatestValidHash: nil}, nil
 	}
 
@@ -494,9 +511,9 @@ func (ea *L2EngineAPI) newPayload(ctx context.Context, payload *eth.ExecutionPay
 		return &eth.PayloadStatusV1{Status: eth.ExecutionAccepted}, nil
 	}
 	log.Trace("Inserting block without sethead", "hash", block.Hash(), "number", block.Number)
-	if err := ea.backend.InsertBlockWithoutSetHead(block); err != nil {
+	if _, err := ea.backend.InsertBlockWithoutSetHead(block, false); err != nil {
 		ea.log.Warn("NewPayloadV1: inserting block failed", "error", err)
-		// TODO not remembering the payload as invalid
+		// Skip remembering the block was invalid, but do return the invalid response.
 		return ea.invalid(err, parent.Header()), nil
 	}
 	hash := block.Hash()

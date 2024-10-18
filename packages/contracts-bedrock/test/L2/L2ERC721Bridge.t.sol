@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.15;
 
-import { console } from "forge-std/console.sol";
-
-// Testing utilities
+// Testing
 import { Bridge_Initializer } from "test/setup/Bridge_Initializer.sol";
 
-// Target contract dependencies
+// Contracts
 import { ERC721 } from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
-import { L1ERC721Bridge } from "src/L1/L1ERC721Bridge.sol";
 import { OptimismMintableERC721 } from "src/universal/OptimismMintableERC721.sol";
 
-// Target contract
-import { L2ERC721Bridge } from "src/L2/L2ERC721Bridge.sol";
+// Interfaces
+import { IL1ERC721Bridge } from "src/L1/interfaces/IL1ERC721Bridge.sol";
+import { IL2ERC721Bridge } from "src/L2/interfaces/IL2ERC721Bridge.sol";
 
 contract TestERC721 is ERC721 {
     constructor() ERC721("Test", "TST") { }
@@ -74,7 +72,7 @@ contract L2ERC721Bridge_Test is Bridge_Initializer {
     }
 
     /// @dev Tests that the constructor sets the correct variables.
-    function test_constructor_succeeds() public {
+    function test_constructor_succeeds() public view {
         assertEq(address(l2ERC721Bridge.MESSENGER()), address(l2CrossDomainMessenger));
         assertEq(address(l2ERC721Bridge.OTHER_BRIDGE()), address(l1ERC721Bridge));
         assertEq(address(l2ERC721Bridge.messenger()), address(l2CrossDomainMessenger));
@@ -83,7 +81,7 @@ contract L2ERC721Bridge_Test is Bridge_Initializer {
 
     /// @dev Ensures that the L2ERC721Bridge is always not paused. The pausability
     ///      happens on L1 and not L2.
-    function test_paused_succeeds() external {
+    function test_paused_succeeds() external view {
         assertFalse(l2ERC721Bridge.paused());
     }
 
@@ -98,9 +96,9 @@ contract L2ERC721Bridge_Test is Bridge_Initializer {
                 (
                     address(l1ERC721Bridge),
                     abi.encodeCall(
-                        L2ERC721Bridge.finalizeBridgeERC721,
+                        IL2ERC721Bridge.finalizeBridgeERC721,
                         (address(remoteToken), address(localToken), alice, alice, tokenId, hex"5678")
-                        ),
+                    ),
                     1234
                 )
             )
@@ -175,9 +173,9 @@ contract L2ERC721Bridge_Test is Bridge_Initializer {
                 (
                     address(l1ERC721Bridge),
                     abi.encodeCall(
-                        L1ERC721Bridge.finalizeBridgeERC721,
+                        IL1ERC721Bridge.finalizeBridgeERC721,
                         (address(remoteToken), address(localToken), alice, bob, tokenId, hex"5678")
-                        ),
+                    ),
                     1234
                 )
             )

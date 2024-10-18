@@ -17,11 +17,20 @@ type Challenger interface {
 	Challenge(ctx context.Context, blockHash common.Hash, oracle Oracle, preimages []keccakTypes.LargePreimageMetaData) error
 }
 
+type OracleSource interface {
+	Oracles() []keccakTypes.LargePreimageOracle
+}
+
+type Metrics interface {
+	RecordLargePreimageCount(count int)
+}
+
 type LargePreimageScheduler struct {
 	log        log.Logger
+	m          Metrics
 	cl         faultTypes.ClockReader
 	ch         chan common.Hash
-	oracles    []keccakTypes.LargePreimageOracle
+	oracles    OracleSource
 	challenger Challenger
 	cancel     func()
 	wg         sync.WaitGroup
@@ -29,14 +38,16 @@ type LargePreimageScheduler struct {
 
 func NewLargePreimageScheduler(
 	logger log.Logger,
+	m Metrics,
 	cl faultTypes.ClockReader,
-	oracles []keccakTypes.LargePreimageOracle,
+	oracleSource OracleSource,
 	challenger Challenger) *LargePreimageScheduler {
 	return &LargePreimageScheduler{
 		log:        logger,
+		m:          m,
 		cl:         cl,
 		ch:         make(chan common.Hash, 1),
-		oracles:    oracles,
+		oracles:    oracleSource,
 		challenger: challenger,
 	}
 }
@@ -79,7 +90,7 @@ func (s *LargePreimageScheduler) Schedule(blockHash common.Hash, _ uint64) error
 
 func (s *LargePreimageScheduler) verifyPreimages(ctx context.Context, blockHash common.Hash) error {
 	var err error
-	for _, oracle := range s.oracles {
+	for _, oracle := range s.oracles.Oracles() {
 		err = errors.Join(err, s.verifyOraclePreimages(ctx, oracle, blockHash))
 	}
 	return err
@@ -90,6 +101,7 @@ func (s *LargePreimageScheduler) verifyOraclePreimages(ctx context.Context, orac
 	if err != nil {
 		return err
 	}
+	s.m.RecordLargePreimageCount(len(preimages))
 	period, err := oracle.ChallengePeriod(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to load challenge period: %w", err)

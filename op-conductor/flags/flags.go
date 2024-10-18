@@ -2,6 +2,7 @@ package flags
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/urfave/cli/v2"
 
@@ -44,6 +45,24 @@ var (
 		Usage:   "Directory to store raft data",
 		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "RAFT_STORAGE_DIR"),
 	}
+	RaftSnapshotInterval = &cli.DurationFlag{
+		Name:    "raft.snapshot-interval",
+		Usage:   "The interval to check if a snapshot should be taken.",
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "RAFT_SNAPSHOT_INTERVAL"),
+		Value:   120 * time.Second,
+	}
+	RaftSnapshotThreshold = &cli.Uint64Flag{
+		Name:    "raft.snapshot-threshold",
+		Usage:   "Number of logs to trigger a snapshot",
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "RAFT_SNAPSHOT_THRESHOLD"),
+		Value:   8192,
+	}
+	RaftTrailingLogs = &cli.Uint64Flag{
+		Name:    "raft.trailing-logs",
+		Usage:   "Number of logs to keep after a snapshot",
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "RAFT_TRAILING_LOGS"),
+		Value:   10240,
+	}
 	NodeRPC = &cli.StringFlag{
 		Name:    "node.rpc",
 		Usage:   "HTTP provider URL for op-node",
@@ -64,10 +83,17 @@ var (
 		Usage:   "Interval allowed between unsafe head and now measured in seconds",
 		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "HEALTHCHECK_UNSAFE_INTERVAL"),
 	}
+	HealthCheckSafeEnabled = &cli.BoolFlag{
+		Name:    "healthcheck.safe-enabled",
+		Usage:   "Whether to enable safe head progression checks",
+		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "HEALTHCHECK_SAFE_ENABLED"),
+		Value:   false,
+	}
 	HealthCheckSafeInterval = &cli.Uint64Flag{
 		Name:    "healthcheck.safe-interval",
 		Usage:   "Interval between safe head progression measured in seconds",
 		EnvVars: opservice.PrefixEnvVar(EnvVarPrefix, "HEALTHCHECK_SAFE_INTERVAL"),
+		Value:   1200,
 	}
 	HealthCheckMinPeerCount = &cli.Uint64Flag{
 		Name:    "healthcheck.min-peer-count",
@@ -97,7 +123,6 @@ var requiredFlags = []cli.Flag{
 	ExecutionRPC,
 	HealthCheckInterval,
 	HealthCheckUnsafeInterval,
-	HealthCheckSafeInterval,
 	HealthCheckMinPeerCount,
 }
 
@@ -105,6 +130,11 @@ var optionalFlags = []cli.Flag{
 	Paused,
 	RPCEnableProxy,
 	RaftBootstrap,
+	HealthCheckSafeEnabled,
+	HealthCheckSafeInterval,
+	RaftSnapshotInterval,
+	RaftSnapshotThreshold,
+	RaftTrailingLogs,
 }
 
 func init() {
